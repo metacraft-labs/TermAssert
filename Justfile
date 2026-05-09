@@ -10,7 +10,7 @@ nim-flags := "--styleCheck:usages --styleCheck:error --passC:-w"
 
 # Test list. The order is deliberate: cheapest tests first, modern-protocol
 # tests at the end.
-tests := "tests/test_harness_spawn_echo.nim tests/test_harness_pilot_typing.nim tests/test_harness_region_text.nim tests/test_harness_wait_for_region_change.nim tests/test_harness_drain_output.nim tests/test_harness_signal_cleanup.nim tests/test_harness_tmux_sanitization.nim tests/test_harness_six_format_snapshot.nim tests/test_harness_screenshot_ipc.nim tests/test_harness_exit_ipc.nim tests/test_harness_mouse_events.nim tests/test_harness_hyperlink_assertion.nim tests/test_harness_notification_received.nim tests/test_harness_window_op_capture.nim tests/test_harness_synchronized_render_assertion.nim tests/test_harness_parallel.nim"
+tests := "tests/test_harness_spawn_echo.nim tests/test_harness_pilot_typing.nim tests/test_harness_region_text.nim tests/test_harness_wait_for_region_change.nim tests/test_harness_drain_output.nim tests/test_harness_signal_cleanup.nim tests/test_harness_tmux_sanitization.nim tests/test_harness_six_format_snapshot.nim tests/test_harness_screenshot_ipc.nim tests/test_harness_exit_ipc.nim tests/test_harness_mouse_events.nim tests/test_harness_hyperlink_assertion.nim tests/test_harness_notification_received.nim tests/test_harness_window_op_capture.nim tests/test_harness_synchronized_render_assertion.nim tests/test_harness_image_kitty.nim tests/test_harness_image_sixel.nim tests/test_harness_image_iterm2.nim tests/test_harness_image_assertion_workflow.nim tests/test_harness_parallel.nim"
 
 build:
     @mkdir -p test-logs

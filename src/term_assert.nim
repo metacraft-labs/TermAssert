@@ -737,3 +737,13 @@ proc terminate*(s: var TuiTestSession) =
   s.pty.terminate()
 
 proc sendSignal*(s: var TuiTestSession; sig: cint) = s.pty.sendSignal(sig)
+
+proc setWindowSize*(s: var TuiTestSession; cols, rows: int) =
+  ## Resize the underlying pty. The kernel delivers SIGWINCH to the
+  ## child; well-behaved TUI apps reflow on the next paint. The
+  ## harness's local `cols`/`rows` are updated so subsequent
+  ## `regionText` calls see the new viewport.
+  s.pty.setWindowSize(cols, rows)
+  s.cols = cols
+  s.rows = rows
+  s.screen.resize(rows, cols)

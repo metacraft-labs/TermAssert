@@ -6,7 +6,7 @@ alias t := test
 alias fmt := format
 
 # Path-based deps to sibling repos in the workspace.
-src-paths := "--path:src --path:tests --path:../nim-pty/src --path:../nim-libvterm/src --path:../nim-termctl/src --path:../TermAssertClient/src"
+src-paths := "--path:src --path:tests --path:../nim-pty/src --path:../nim-libvterm/src --path:../TermAssertClient/src"
 
 nim-flags := "--styleCheck:usages --styleCheck:error --passC:-w"
 

@@ -39,7 +39,7 @@ jobs:
 
       - uses: actions/checkout@v4
       - name: Setup dev env (clones .github/sibling-repos at lock revisions)
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: nix
           gh-token: ${{ steps.app-token.outputs.token }}
@@ -76,7 +76,7 @@ jobs:
 
       - uses: actions/checkout@v4
       - name: Setup dev env (clones .github/sibling-repos at lock revisions)
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: nix
           gh-token: ${{ steps.app-token.outputs.token }}
@@ -115,7 +115,7 @@ jobs:
 
       - uses: actions/checkout@v4
       - name: Setup dev env (clones .github/sibling-repos at lock revisions)
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: nix
           gh-token: ${{ steps.app-token.outputs.token }}

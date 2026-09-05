@@ -34,12 +34,21 @@ const
 
 proc renderPlain*(s: Screen): string =
   ## Plain UTF-8: one row per line, trailing whitespace stripped.
+  ##
+  ## Width-2 cells emit the wide rune once; their trailing-half continuation
+  ## cell (`width == 0`) is skipped. That is the same rule isonim-tui's
+  ## `testing/snapshot/plaintext.encodePlaintext` states in its own docstring,
+  ## and this encoder claims — in this module's header — to produce the same
+  ## six-file layout, so the rule has to be the same one. Emitting a space for
+  ## the continuation instead added one character per wide glyph and made the
+  ## two tiers' `plaintext.txt` differ over screens that were identical.
   let (rows, cols) = s.size()
   result = ""
   for r in 0 ..< rows:
     var line = ""
     for c in 0 ..< cols:
       let cell = s.cellAt(r, c)
+      if cell.width == 0: continue
       if cell.rune.int32 == 0:
         line.add ' '
       else:
@@ -59,6 +68,10 @@ proc renderAnsi*(s: Screen): string =
     result.add "\x1b[" & $(r+1) & ";1H"
     for c in 0 ..< cols:
       let cell = s.cellAt(r, c)
+      # Same rule as `renderPlain`: the trailing half of a width-2 glyph is
+      # not a character, and emitting one for it would shift every cell to its
+      # right by a column when this stream is replayed.
+      if cell.width == 0: continue
       var sgr = "\x1b[0m"
       if caBold in cell.attrs: sgr.add "\x1b[1m"
       if caItalic in cell.attrs: sgr.add "\x1b[3m"
@@ -110,6 +123,14 @@ proc renderCellmap*(s: Screen): string =
       ch["fg"] = colorJson(cell.fg)
       ch["bg"] = colorJson(cell.bg)
       ch["attrs"] = attrsJson(cell.attrs)
+      # UNDERLINE IS NOT ONE OF `Cell.attrs`, and leaving it out made this
+      # file silent about a styling difference the Screen knows. libvterm
+      # models underline as a 2-bit style field rather than a boolean SGR
+      # flag, so `attrsJson` above cannot carry it; a compositor that emits
+      # `CSI 4 m` and one that does not produced byte-identical `cellmap.json`
+      # here. Emitted as the style's name so `usSingle` / `usDouble` /
+      # `usCurly` / `usDotted` / `usDashed` stay distinguishable.
+      ch["underline"] = %($cell.underline)
       ch["width"] = %cell.width
       ch["hyperlinkId"] = %int(uint32(cell.hyperlinkId))
       ch["imageRef"] = %int(uint32(cell.imageRef))

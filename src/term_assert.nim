@@ -176,7 +176,36 @@ const tmuxBlockedDefault = ["TMUX", "TMUX_PANE"]
 
 proc effectiveEnv(b: TuiTestBuilder; harnessUri: string): seq[(string, string)] =
   ## Build the effective environment: inherit (if enabled) minus blocked
-  ## minus tmux defaults plus overrides plus TERM_ASSERT_URI.
+  ## minus tmux defaults, then apply the overrides, then `TERM_ASSERT_URI`.
+  ##
+  ## ## THE BLOCKLIST FILTERS THE INHERITED ENVIRONMENT ONLY
+  ##
+  ## `envRemove` says "do not let the ambient value through"; `envSet` says
+  ## "the child sees exactly this". An explicit override is the more specific
+  ## instruction of the two and it WINS, whatever order the builder calls
+  ## arrived in.
+  ##
+  ## This used to apply `blocked` to `b.envOverrides` as well, which made
+  ## `.envRemove(X).envSet(X, v)` leave `X` ABSENT — the caller's own value
+  ## silently discarded by the caller's own earlier line. It is a natural thing
+  ## to write: a suite that wants a known environment removes the five
+  ## variables an inherited terminal might set and then sets the ones it needs,
+  ## and two of those sets can easily name a variable the first list also
+  ## covered.
+  ##
+  ## It cost a real measurement. `codetracer`'s
+  ## `tests/real_terminal/test_real_pty_lifecycle.nim` bounds a DAP handshake
+  ## with a budget passed through an environment variable, and asserts that the
+  ## exit time TRACKS the budget. With this defect the variable never reached
+  ## the child, which used its own 30-second default both times: the case
+  ## measured **30,013 ms and 30,016 ms for budgets 4,500 ms apart** and read
+  ## as "the implementation ends the session for some other reason". The
+  ## assertion was right and the harness was wrong, which is the worst way
+  ## round for a harness to be.
+  ##
+  ## The tmux defaults are on the same footing: they exist so an inherited
+  ## `$TMUX` cannot make a child think it is inside a multiplexer, and a caller
+  ## that explicitly sets `TMUX` is asking for the opposite on purpose.
   let blocked = block:
     var s = newSeq[string]()
     for v in tmuxBlockedDefault: s.add v
@@ -189,7 +218,6 @@ proc effectiveEnv(b: TuiTestBuilder; harnessUri: string): seq[(string, string)] 
       if b.envOverrides.hasKey(k): continue
       result.add((k, v))
   for k, v in b.envOverrides:
-    if k in blocked: continue
     result.add((k, v))
   # Always inject the IPC URI so children can connect.
   result.add(("TERM_ASSERT_URI", harnessUri))

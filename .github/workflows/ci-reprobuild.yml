@@ -71,6 +71,23 @@ jobs:
         with:
           env-flavor: reprobuild
           gh-token: ${{ steps.ci_token.outputs.token }}
+          # TEMPORARY — DO NOT MERGE THIS LINE.
+          #
+          # Builds the `repro` CLI from reprobuild@fix/pin-io-mon-arm64-shim-guard
+          # instead of reprobuild@dev, purely to prove that branch on a real
+          # consumer lane before it lands. That branch bumps the `io-mon-src`
+          # flake input to io-mon@811fb26, which stops
+          # `librepro_monitor_shim.so` referencing nim-stackable-hooks'
+          # amd64-only raw-syscall substrate.
+          #
+          # The lane that matters here is `linux-arm64`. On reprobuild@dev it
+          # fails with `librepro_monitor_shim.so: undefined symbol:
+          # stackable_linux_chain_sigtrap` (run 34228839881, job 102069551125,
+          # runner garm-nuoeejogeifg). `linux-x64` is the control: it never had
+          # the symbol error and must stay unaffected.
+          #
+          # Revert to the default (`dev`) once the reprobuild branch is merged.
+          repro-build-pin: fix/pin-io-mon-arm64-shim-guard
 
       - name: repro build
         # Builds the conventional `build` collection declared in

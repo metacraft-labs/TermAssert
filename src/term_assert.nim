@@ -76,6 +76,7 @@ type
     envBlocked: seq[string]
     cwd: string
     inheritEnv: bool
+    recordTranscript: bool
 
   ScreenSnapshot* = object
     label*: string
@@ -94,6 +95,9 @@ type
     snapshotsTable: Table[string, ScreenSnapshot]
     rxBuf: seq[byte]
     closed: bool
+    transcriptOn: bool
+    transcriptBuf: string
+    transcriptDropped: int
 
   TimeoutError* = object of CatchableError
   AssertionFailedError* = object of CatchableError
@@ -114,6 +118,7 @@ proc newTuiTest*(cmd: string; args: openArray[string]): TuiTestBuilder =
   result.envBlocked = @[]
   result.cwd = ""
   result.inheritEnv = true
+  result.recordTranscript = false
 
 proc width*(b: TuiTestBuilder; cols: int): TuiTestBuilder =
   result = b
@@ -135,6 +140,34 @@ proc workDir*(b: TuiTestBuilder; dir: string): TuiTestBuilder =
   result = b
   result.cwd = dir
 
+const TranscriptCapBytes* = 8 * 1024 * 1024
+  ## How much of a session's raw byte stream `transcript` keeps.
+  ##
+  ## A cap rather than an unbounded buffer, because a soak test that ran for
+  ## an hour would otherwise hold every byte its child ever wrote. Eight
+  ## megabytes is roughly nine hundred full 200x60 frames — far more than any
+  ## assertion about a startup or a shutdown needs, and `transcriptDropped`
+  ## says when it was not enough rather than letting a truncated buffer read
+  ## as a complete one.
+
+proc transcript*(b: TuiTestBuilder; on = true): TuiTestBuilder =
+  ## Keep the child's RAW BYTE STREAM, in addition to parsing it.
+  ##
+  ## OFF BY DEFAULT, because almost every assertion in this harness is about
+  ## the parsed screen and a second copy of the bytes would be pure cost. It
+  ## exists for the claims a parsed screen cannot carry — the ones about
+  ## SEQUENCES rather than about cells.
+  ##
+  ## The motivating case is the alternate screen. `CSI ? 1049 h` and
+  ## `CSI ? 1049 l` are a PAIR, and a terminal's live state after the child has
+  ## exited says nothing about whether both were sent — the same "live flag,
+  ## not a latch" property `nim-libvterm`'s `synchronizedOutput` has. Counting
+  ## them in the stream is the only way to observe the pair, and
+  ## `codetracer`'s `tests/real_terminal/test_real_pty_lifecycle.nim` is what
+  ## asked for it.
+  result = b
+  result.recordTranscript = on
+
 # ---------------------------------------------------------------------------
 # Spawn
 # ---------------------------------------------------------------------------
@@ -143,7 +176,36 @@ const tmuxBlockedDefault = ["TMUX", "TMUX_PANE"]
 
 proc effectiveEnv(b: TuiTestBuilder; harnessUri: string): seq[(string, string)] =
   ## Build the effective environment: inherit (if enabled) minus blocked
-  ## minus tmux defaults plus overrides plus TERM_ASSERT_URI.
+  ## minus tmux defaults, then apply the overrides, then `TERM_ASSERT_URI`.
+  ##
+  ## ## THE BLOCKLIST FILTERS THE INHERITED ENVIRONMENT ONLY
+  ##
+  ## `envRemove` says "do not let the ambient value through"; `envSet` says
+  ## "the child sees exactly this". An explicit override is the more specific
+  ## instruction of the two and it WINS, whatever order the builder calls
+  ## arrived in.
+  ##
+  ## This used to apply `blocked` to `b.envOverrides` as well, which made
+  ## `.envRemove(X).envSet(X, v)` leave `X` ABSENT — the caller's own value
+  ## silently discarded by the caller's own earlier line. It is a natural thing
+  ## to write: a suite that wants a known environment removes the five
+  ## variables an inherited terminal might set and then sets the ones it needs,
+  ## and two of those sets can easily name a variable the first list also
+  ## covered.
+  ##
+  ## It cost a real measurement. `codetracer`'s
+  ## `tests/real_terminal/test_real_pty_lifecycle.nim` bounds a DAP handshake
+  ## with a budget passed through an environment variable, and asserts that the
+  ## exit time TRACKS the budget. With this defect the variable never reached
+  ## the child, which used its own 30-second default both times: the case
+  ## measured **30,013 ms and 30,016 ms for budgets 4,500 ms apart** and read
+  ## as "the implementation ends the session for some other reason". The
+  ## assertion was right and the harness was wrong, which is the worst way
+  ## round for a harness to be.
+  ##
+  ## The tmux defaults are on the same footing: they exist so an inherited
+  ## `$TMUX` cannot make a child think it is inside a multiplexer, and a caller
+  ## that explicitly sets `TMUX` is asking for the opposite on purpose.
   let blocked = block:
     var s = newSeq[string]()
     for v in tmuxBlockedDefault: s.add v
@@ -156,7 +218,6 @@ proc effectiveEnv(b: TuiTestBuilder; harnessUri: string): seq[(string, string)] 
       if b.envOverrides.hasKey(k): continue
       result.add((k, v))
   for k, v in b.envOverrides:
-    if k in blocked: continue
     result.add((k, v))
   # Always inject the IPC URI so children can connect.
   result.add(("TERM_ASSERT_URI", harnessUri))
@@ -171,6 +232,9 @@ proc spawn*(b: TuiTestBuilder): TuiTestSession =
   sess.snapshotsTable = initTable[string, ScreenSnapshot]()
   sess.rxBuf = @[]
   sess.closed = false
+  sess.transcriptOn = b.recordTranscript
+  sess.transcriptBuf = ""
+  sess.transcriptDropped = 0
   sess.ipc = startIpcServer()
   let env = effectiveEnv(b, sess.ipc.socketPath)
   let opts = SpawnOptions(cols: b.cols, rows: b.rows, cwd: b.cwd)
@@ -193,6 +257,22 @@ proc spawn*(b: TuiTestBuilder): TuiTestSession =
 # ---------------------------------------------------------------------------
 # I/O pump - read bytes from the pty and feed libvterm
 # ---------------------------------------------------------------------------
+
+proc recordBytes(s: var TuiTestSession; chunk: openArray[byte]) =
+  ## Append one pty read to the transcript, when one is being kept.
+  ##
+  ## EVERY BYTE THE HARNESS READS PASSES THROUGH HERE, at the same three call
+  ## sites that feed libvterm, so the transcript and the parsed screen can
+  ## never be built from different data.
+  if not s.transcriptOn:
+    return
+  if s.transcriptBuf.len + chunk.len > TranscriptCapBytes:
+    s.transcriptDropped += chunk.len
+    return
+  let start = s.transcriptBuf.len
+  s.transcriptBuf.setLen(start + chunk.len)
+  for i, b in chunk:
+    s.transcriptBuf[start + i] = char(b)
 
 proc handleIpcCommands(s: var TuiTestSession) =
   ## Drain pending IPC commands and respond. Each `screenshot` request
@@ -229,6 +309,7 @@ proc pump(s: var TuiTestSession; budgetMs: int): int =
     if rem.inMilliseconds <= 0:
       let chunk = readBytes(s.pty, 4096, initDuration(milliseconds = 0))
       if chunk.len == 0: break
+      s.recordBytes(chunk)
       s.screen.feed(chunk)
       result += chunk.len
       handleIpcCommands(s)
@@ -239,6 +320,7 @@ proc pump(s: var TuiTestSession; budgetMs: int): int =
       handleIpcCommands(s)
       if not isAlive(s.pty): break
       continue
+    s.recordBytes(chunk)
     s.screen.feed(chunk)
     result += chunk.len
     handleIpcCommands(s)
@@ -252,6 +334,7 @@ proc drainOutput*(s: var TuiTestSession; idleMs: int = 30): int =
     let chunk = readBytes(s.pty, 4096, initDuration(milliseconds = idleMs))
     handleIpcCommands(s)
     if chunk.len > 0:
+      s.recordBytes(chunk)
       s.screen.feed(chunk)
       result += chunk.len
       lastActivity = getMonoTime()
@@ -261,6 +344,21 @@ proc drainOutput*(s: var TuiTestSession; idleMs: int = 30): int =
       if elapsed.inMilliseconds >= idleMs.int64:
         break
       if not isAlive(s.pty): break
+
+proc transcriptBytes*(s: var TuiTestSession): string =
+  ## Every byte this session's child has written so far, when the builder
+  ## asked for a transcript; "" otherwise.
+  ##
+  ## Runs a non-blocking pump first, for the same reason `screenContents` does:
+  ## a caller that has just sent a key wants the answer that includes it.
+  discard pump(s, 0)
+  s.transcriptBuf
+
+proc transcriptDroppedBytes*(s: var TuiTestSession): int =
+  ## How many bytes the cap discarded. NON-ZERO MEANS THE TRANSCRIPT IS
+  ## INCOMPLETE, and an assertion about a sequence not appearing in it is not
+  ## sound — check this before trusting a negative.
+  s.transcriptDropped
 
 # ---------------------------------------------------------------------------
 # Screen / state queries

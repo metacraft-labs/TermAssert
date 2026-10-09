@@ -97,7 +97,6 @@ sess.close()
 
 ## Specs
 
-The authoritative spec for this library is the **M28** entry in
-`Front-Ends/IsoNim/isonim-tui.milestones.org` in the
-`codetracer-specs` repo. Repo-level conformance is governed by
-`metacraft-specs/policies/repo-requirements.md`.
+Design documents, plans and open issues for this repository are kept in the
+maintainers' project-management repository, which is not public. Contributors
+without access should open a GitHub issue here.

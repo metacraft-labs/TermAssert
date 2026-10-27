@@ -29,5 +29,5 @@
 # Cross-repo siblings cloned by setup-dev-env at the explicit SHAs
 # pinned below (see codetracer-specs/Testing/Cross-Repo-CI-Integration.md).
 TermAssertClient=7a45b731a5dd686d41463161f3e7ac843a026655  # TermAssertClient@dev tip
-nim-libvterm=021645c8de7a4ba00919f30d18d27804c9692156  # nim-libvterm@dev tip
+nim-libvterm=a96c190d57f3c8593e6f6116cc06f08c2bde7c10  # nim-libvterm@agents: Screen.mouseTracking
 nim-pty=a44c4d0efb1d19fcd4e7ff369e8e7d27af9c84ab  # nim-pty@dev tip

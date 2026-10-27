@@ -200,6 +200,8 @@ const posixHarnessSpecs: seq[HarnessTestSpec] = @[
     binary: "build/test-bin/test_harness_exit_ipc"),
   HarnessTestSpec(source: "tests/test_harness_mouse_events.nim",
     binary: "build/test-bin/test_harness_mouse_events"),
+  HarnessTestSpec(source: "tests/test_harness_mouse_drag.nim",
+    binary: "build/test-bin/test_harness_mouse_drag"),
   HarnessTestSpec(source: "tests/test_harness_hyperlink_assertion.nim",
     binary: "build/test-bin/test_harness_hyperlink_assertion"),
   HarnessTestSpec(source: "tests/test_harness_notification_received.nim",

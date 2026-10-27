@@ -38,7 +38,7 @@
 ##   +-- snapshots: Table[string, ScreenSnapshot]   (IPC-recorded screens)
 ## ```
 
-import std/[options, os, strutils, monotimes, times, tables, json]
+import std/[options, os, strutils, monotimes, times, tables, json, math]
 
 import nim_pty
 import nim_libvterm
@@ -543,25 +543,98 @@ proc sendKey*(s: var TuiTestSession; name: string) =
   if seq2.len > 0:
     s.send(seq2)
 
+type
+  MouseTrackingError* = object of CatchableError
+    ## Raised when a pointer report is asked for that the child did not
+    ## enable: a real terminal would not send it, so sending it would test a
+    ## terminal that does not exist.
+
+proc mouseTracking*(s: var TuiTestSession): MouseTracking =
+  ## Which pointer events the child enabled (DEC 1000 / 1002 / 1003).
+  discard pump(s, 0)
+  s.screen.mouseTracking()
+
+proc buttonCode(button: MouseButton): int =
+  case button
+  of mbLeft: 0
+  of mbMiddle: 1
+  of mbRight: 2
+  of mbWheelUp: 64
+  of mbWheelDown: 65
+
+proc modifierBits(modifiers: set[KeyModifier]): int =
+  (if kmShift in modifiers: 4 else: 0) or (if kmAlt in modifiers: 8 else: 0) or
+    (if kmCtrl in modifiers: 16 else: 0)
+
+proc sgrReport(code, row, col: int; final: char): string =
+  ## One SGR 1006 report at 0-based (row, col); the wire format is 1-based
+  ## column first. Every pointer procedure goes through this one encoder.
+  "\x1b[<" & $code & ";" & $(col + 1) & ";" & $(row + 1) & $final
+
+proc sendMousePress*(s: var TuiTestSession; row, col: int;
+                     button: MouseButton = mbLeft;
+                     modifiers: set[KeyModifier] = {}) =
+  ## SGR 1006 press at 0-based (row, col).
+  s.send(sgrReport(buttonCode(button) or modifierBits(modifiers), row, col, 'M'))
+
+proc sendMouseRelease*(s: var TuiTestSession; row, col: int;
+                       button: MouseButton = mbLeft;
+                       modifiers: set[KeyModifier] = {}) =
+  ## SGR 1006 release at 0-based (row, col).
+  s.send(sgrReport(buttonCode(button) or modifierBits(modifiers), row, col, 'm'))
+
+proc requireTracking(s: var TuiTestSession; needed: MouseTracking; what: string) =
+  let have = s.mouseTracking()
+  if ord(have) < ord(needed):
+    raise newException(MouseTrackingError, what & " needs mouse tracking " & $needed &
+      " (DEC " & (if needed == mtDrag: "1002" else: "1003") & "), but the child enabled " &
+      $have & "; a real terminal would send no motion report")
+
+proc sendMouseMove*(s: var TuiTestSession; row, col: int;
+                    held: set[MouseButton] = {};
+                    modifiers: set[KeyModifier] = {}) =
+  ## SGR 1006 motion report at 0-based (row, col): the code of the held
+  ## button (or 3 for none) plus 32. Motion with a button held needs the
+  ## child to have enabled 1002 or 1003; motion with none needs 1003.
+  ## Otherwise raises `MouseTrackingError` and sends nothing.
+  var base = 3
+  for b in [mbLeft, mbMiddle, mbRight]:
+    if b in held:
+      base = buttonCode(b)
+      break
+  s.requireTracking((if base == 3: mtMove else: mtDrag), "a pointer motion")
+  s.send(sgrReport((base + 32) or modifierBits(modifiers), row, col, 'M'))
+
+proc sendMouseDrag*(s: var TuiTestSession; fromRow, fromCol, toRow, toCol: int;
+                    button: MouseButton = mbLeft;
+                    modifiers: set[KeyModifier] = {};
+                    steps = 0) =
+  ## A drag: press at (fromRow, fromCol), motion reports with the button held,
+  ## release at (toRow, toCol). With `steps = 0` there is one motion report per
+  ## cell crossed along the straight line, ending at the destination; with
+  ## `steps = n`, n reports evenly spaced. Needs the child to have enabled
+  ## 1002 or 1003 — checked before anything is sent.
+  s.requireTracking(mtDrag, "a drag")
+  let dr = toRow - fromRow
+  let dc = toCol - fromCol
+  let n = (if steps > 0: steps else: max(abs(dr), abs(dc)))
+  let code = (buttonCode(button) + 32) or modifierBits(modifiers)
+  s.sendMousePress(fromRow, fromCol, button, modifiers)
+  var last = (fromRow, fromCol)
+  for k in 1 .. n:
+    let r = fromRow + int(round(float(dr * k) / float(n)))
+    let c = fromCol + int(round(float(dc * k) / float(n)))
+    if (r, c) == last and steps == 0: continue
+    s.send(sgrReport(code, r, c, 'M'))
+    last = (r, c)
+  s.sendMouseRelease(toRow, toCol, button, modifiers)
+
 proc sendMouseClick*(s: var TuiTestSession; row, col: int;
                     button: MouseButton = mbLeft;
                     modifiers: set[KeyModifier] = {}) =
-  ## SGR 1006 mouse press + release at 1-based (col, row).
-  var bcode = case button
-    of mbLeft: 0
-    of mbMiddle: 1
-    of mbRight: 2
-    of mbWheelUp: 64
-    of mbWheelDown: 65
-  if kmShift in modifiers: bcode = bcode or 4
-  if kmAlt in modifiers: bcode = bcode or 8
-  if kmCtrl in modifiers: bcode = bcode or 16
-  let xCol = col + 1
-  let yRow = row + 1
-  let press = "\x1b[<" & $bcode & ";" & $xCol & ";" & $yRow & "M"
-  let release = "\x1b[<" & $bcode & ";" & $xCol & ";" & $yRow & "m"
-  s.send(press)
-  s.send(release)
+  ## SGR 1006 press and release at one 0-based (row, col).
+  s.sendMousePress(row, col, button, modifiers)
+  s.sendMouseRelease(row, col, button, modifiers)
 
 proc sendMouseScroll*(s: var TuiTestSession; row, col: int; direction: ScrollDir) =
   let btn = if direction == sdUp: mbWheelUp else: mbWheelDown

@@ -1,0 +1,21 @@
+# ta2 mutation results — 2026-10-27 23:25:59 +0200
+# kill command: bash -euo pipefail -c nim c -r --hints:off --passC:-w --path:src --path:tests --path:/home/zahary/m/dev/nim-pty/src --path:/home/zahary/m/codetracer-gui/dvs-libvterm/src --path:/home/zahary/m/dev/TermAssertClient/src --mm:orc -d:release --threads:on --nimcache:${BUILD_DIR}/nc-keys -o:${BUILD_DIR}/keys tests/test_harness_key_modifiers.nim
+
+KILLED   K1       26.9s  Shift dropped from the modifier parameter
+           |     /home/zahary/m/codetracer-gui/dvs-termassert/tests/test_harness_key_modifiers.nim(50, 37): Check failed: s.screenContents().contains(want)
+           |   [FAILED] the bytes reach the child as encoded
+           | Error: execution of an external program failed: '/tmp/nix-shell.u9jQut/ta2-mut-ut4syit4/keys'
+KILLED   K2        8.2s  Shift dropped from a letter
+           |     /home/zahary/m/codetracer-gui/dvs-termassert/tests/test_harness_key_modifiers.nim(50, 37): Check failed: s.screenContents().contains(want)
+           |   [FAILED] the bytes reach the child as encoded
+           | Error: execution of an external program failed: '/tmp/nix-shell.u9jQut/ta2-mut-ut4syit4/keys'
+KILLED   K3        4.7s  a modifier dropped instead of refused
+           |   [FAILED] a combination no terminal encoding expresses is refused
+           |   [OK] the bytes reach the child as encoded
+           | Error: execution of an external program failed: '/tmp/nix-shell.u9jQut/ta2-mut-ut4syit4/keys'
+KILLED   K4        6.1s  the modifier parameter dropped on tilde keys
+           |   [OK] a combination no terminal encoding expresses is refused
+           |   [OK] the bytes reach the child as encoded
+           | Error: execution of an external program failed: '/tmp/nix-shell.u9jQut/ta2-mut-ut4syit4/keys'
+
+4/4 killed, 0 survived

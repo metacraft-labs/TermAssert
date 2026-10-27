@@ -486,62 +486,101 @@ proc sendControl*(s: var TuiTestSession; c: char) =
   var arr = [b]
   s.pty.write(arr)
 
-proc sendKey*(s: var TuiTestSession; name: string) =
-  ## Common named keys (xterm sequences). Modifiers in the form
-  ## `ctrl+a`, `alt+f1` are handled by stripping the prefix.
+type
+  KeyEncodingError* = object of ValueError
+    ## Raised for a key with modifiers no terminal encoding expresses: the key
+    ## is never sent without them.
+
+proc keyBytes*(name: string): string =
+  ## The bytes a terminal (xterm) sends for a key name with optional
+  ## `ctrl+`, `alt+`, `shift+` prefixes. Modifiers on cursor, editing and
+  ## function keys use xterm's parameter (1 + shift 1, alt 2, ctrl 4);
+  ## Shift on a letter is its capital; Ctrl on a letter is its control
+  ## character; Alt prefixes ESC. A combination with no encoding raises
+  ## `KeyEncodingError` rather than dropping a modifier.
   var key = name.toLowerAscii()
-  var ctrl = false
-  var alt = false
+  var ctrl, alt, shift = false
   while true:
     if key.startsWith("ctrl+"):
       ctrl = true; key = key[5 .. ^1]
     elif key.startsWith("alt+"):
       alt = true; key = key[4 .. ^1]
     elif key.startsWith("shift+"):
-      key = key[6 .. ^1]
+      shift = true; key = key[6 .. ^1]
     else: break
-  var seq2 = ""
+  let m = 1 + (if shift: 1 else: 0) + (if alt: 2 else: 0) + (if ctrl: 4 else: 0)
+  let modified = m > 1
+  proc csi(final: char): string =
+    (if modified: "\x1b[1;" & $m & $final else: "\x1b[" & $final)
+  proc tilde(n: int): string =
+    (if modified: "\x1b[" & $n & ";" & $m & "~" else: "\x1b[" & $n & "~")
+  proc ss3(final: char): string =
+    (if modified: "\x1b[1;" & $m & $final else: "\x1bO" & $final)
+  proc plain(bytes: string): string =
+    # keys whose only modifier encoding is the Alt (ESC) prefix
+    if ctrl or shift:
+      raise newException(KeyEncodingError, "no terminal encoding for " & name)
+    (if alt: "\x1b" & bytes else: bytes)
   case key
-  of "up": seq2 = "\x1b[A"
-  of "down": seq2 = "\x1b[B"
-  of "right": seq2 = "\x1b[C"
-  of "left": seq2 = "\x1b[D"
-  of "home": seq2 = "\x1b[H"
-  of "end": seq2 = "\x1b[F"
-  of "pageup", "pgup": seq2 = "\x1b[5~"
-  of "pagedown", "pgdn": seq2 = "\x1b[6~"
-  of "insert": seq2 = "\x1b[2~"
-  of "delete", "del": seq2 = "\x1b[3~"
-  of "tab": seq2 = "\t"
-  of "backtab": seq2 = "\x1b[Z"
-  of "enter", "return": seq2 = "\r"
-  of "escape", "esc": seq2 = "\x1b"
-  of "backspace": seq2 = "\x7f"
-  of "space": seq2 = " "
-  of "f1": seq2 = "\x1bOP"
-  of "f2": seq2 = "\x1bOQ"
-  of "f3": seq2 = "\x1bOR"
-  of "f4": seq2 = "\x1bOS"
-  of "f5": seq2 = "\x1b[15~"
-  of "f6": seq2 = "\x1b[17~"
-  of "f7": seq2 = "\x1b[18~"
-  of "f8": seq2 = "\x1b[19~"
-  of "f9": seq2 = "\x1b[20~"
-  of "f10": seq2 = "\x1b[21~"
-  of "f11": seq2 = "\x1b[23~"
-  of "f12": seq2 = "\x1b[24~"
+  of "up": csi('A')
+  of "down": csi('B')
+  of "right": csi('C')
+  of "left": csi('D')
+  of "home": csi('H')
+  of "end": csi('F')
+  of "pageup", "pgup": tilde(5)
+  of "pagedown", "pgdn": tilde(6)
+  of "insert": tilde(2)
+  of "delete", "del": tilde(3)
+  of "f1": ss3('P')
+  of "f2": ss3('Q')
+  of "f3": ss3('R')
+  of "f4": ss3('S')
+  of "f5": tilde(15)
+  of "f6": tilde(17)
+  of "f7": tilde(18)
+  of "f8": tilde(19)
+  of "f9": tilde(20)
+  of "f10": tilde(21)
+  of "f11": tilde(23)
+  of "f12": tilde(24)
+  of "tab":
+    if shift and not ctrl and not alt: "\x1b[Z"
+    else: plain("\t")
+  of "backtab": (if modified: raise newException(KeyEncodingError, "no terminal encoding for " & name) else: "\x1b[Z")
+  of "enter", "return": plain("\r")
+  of "escape", "esc": plain("\x1b")
+  of "backspace": plain("\x7f")
+  of "space":
+    if ctrl and not shift: (if alt: "\x1b\x00" else: "\x00")
+    else: plain(" ")
   else:
-    if key.len == 1:
-      var b = byte(ord(key[0]))
-      if ctrl:
-        b = b and 0x1F.byte
-      var pre = ""
-      if alt: pre.add '\x1b'
-      seq2 = pre & $char(b)
-    else:
+    if key.len != 1:
       raise newException(ValueError, "unknown key: " & name)
-  if seq2.len > 0:
-    s.send(seq2)
+    var c = key[0]
+    # the case of a single character comes from the original spelling
+    let orig = name[^1]
+    if orig in {'A'..'Z'}: c = orig
+    if shift:
+      if c in {'a'..'z'}: c = c.toUpperAscii
+      elif c notin {'A'..'Z'}:
+        raise newException(KeyEncodingError, "no terminal encoding for " & name &
+          " (send the shifted character itself)")
+    var b = byte(ord(c))
+    if ctrl:
+      if c in {'a'..'z', 'A'..'Z'} and not shift: b = b and 0x1F.byte
+      elif c in {'A'..'Z'} and shift:
+        raise newException(KeyEncodingError, "no terminal encoding for " & name)
+      elif c in {'@', '[', '\\', ']', '^', '_'}: b = b and 0x1F.byte
+      else: raise newException(KeyEncodingError, "no terminal encoding for " & name)
+    (if alt: "\x1b" else: "") & $char(b)
+
+proc sendKey*(s: var TuiTestSession; name: string) =
+  ## Send a named key ("up", "f5", "enter", a single character) with optional
+  ## `ctrl+`, `alt+` and `shift+` prefixes, encoded as a terminal does (see
+  ## `keyBytes`). Raises `KeyEncodingError` for a combination a terminal
+  ## cannot express; a modifier is never dropped.
+  s.send(keyBytes(name))
 
 type
   MouseTrackingError* = object of CatchableError

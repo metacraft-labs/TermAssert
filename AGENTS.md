@@ -26,6 +26,10 @@ synchronized output, kitty keyboard, mouse 1006/1016).
   is the child-side counterpart).
 - Write six-format goldens that share the layout used by isonim-tui's
   in-process `TerminalTestHarness` from M2.
+- Compare a screen's words AND every cell's colours and attributes against a
+  committed styled snapshot (`styledSnapshotDiffs`: `plaintext.txt` plus a
+  compact `styles.txt`), and draw a screen in its own colours as SVG
+  (`renderColourSvg`) for review or PNG conversion.
 
 ## Status
 

@@ -16,6 +16,24 @@
 ## When the env var `SNAP_RECORD=1` is set, `compareSnap` becomes
 ## `recordSnap`: existing files are overwritten with the current state.
 ## Otherwise mismatches surface as test failures with a diff.
+##
+## ## Styled snapshots
+##
+## `snap` compares `plaintext.txt` only, so a screen whose words are right and
+## whose colours are wrong passes it. A STYLED snapshot (`styledSnapshotDiffs`)
+## compares the words AND every cell's style, from two small files meant to be
+## committed:
+##
+##   * plaintext.txt - as above;
+##   * styles.txt    - every cell's foreground, background and attributes, as a
+##                     legend of the distinct styles and one line of runs per
+##                     row (`renderStyles` documents the format).
+##
+## `cellmap.json` carries the same facts but at ~150 bytes a cell, which is
+## too large to commit for a screen of any size and too verbose to review;
+## `styles.txt` is typically a few hundred bytes a screen. `renderColourSvg`
+## draws the screen in its colours (the six-format `svg.svg` draws every
+## cell light-on-black), for a reviewer's eyes or a PNG conversion.
 
 import std/[os, strutils, json, unicode]
 import nim_libvterm
@@ -27,6 +45,8 @@ const
   snapSvg* = "svg.svg"
   snapAnnotatedSvg* = "annotated.svg"
   snapTreedump* = "treedump.txt"
+  snapStyles* = "styles.txt"
+    ## A styled snapshot's second file (`renderStyles`); not one of the six.
 
   snapAllFiles* = [
     snapPlainText, snapAnsi, snapCellmap,
@@ -192,6 +212,212 @@ proc renderAnnotatedSvg*(s: Screen): string =
     let y = r * ch
     result.add "<line x1=\"0\" y1=\"" & $y & "\" x2=\"" & $w & "\" y2=\"" & $y &
                "\" stroke=\"#444\" stroke-width=\"0.3\"/>\n"
+  result.add "</svg>\n"
+
+proc colourSpelling(c: Color): string =
+  case c.kind
+  of ckDefault: "default"
+  of ckIndexed: "i" & $int(c.idx)
+  of ckRgb: "#" & toHex(int(c.r), 2).toLowerAscii & toHex(int(c.g), 2).toLowerAscii &
+            toHex(int(c.b), 2).toLowerAscii
+
+proc styleKey*(cell: Cell): string =
+  ## One cell's style: `<fg>/<bg>` and its attributes, each `+name`, in a
+  ## fixed order (bold, italic, blink, reverse, conceal, strike, then the
+  ## underline style when there is one).
+  result = colourSpelling(cell.fg) & "/" & colourSpelling(cell.bg)
+  if caBold in cell.attrs: result.add "+bold"
+  if caItalic in cell.attrs: result.add "+italic"
+  if caBlink in cell.attrs: result.add "+blink"
+  if caReverse in cell.attrs: result.add "+reverse"
+  if caConceal in cell.attrs: result.add "+conceal"
+  if caStrike in cell.attrs: result.add "+strike"
+  if cell.underline != usNone: result.add "+underline:" & $cell.underline
+
+const StylesHeader = "# TermAssert styles v1"
+
+proc renderStyles*(s: Screen): string =
+  ## The screen's cell styles as text:
+  ##
+  ##     # TermAssert styles v1 <rows>x<cols>
+  ##     <n> <style>        one per distinct style, numbered by first use
+  ##     ...
+  ##     r<row>: <n>*<count> <n>*<count> ...
+  ##
+  ## Styles are numbered in row-major order of first appearance, so the file
+  ## is a function of the screen. The trailing half of a width-2 glyph is not
+  ## a cell of its own here (as in `renderPlain`): it carries the glyph's
+  ## style and is skipped.
+  let (rows, cols) = s.size()
+  var legend: seq[string]
+  var runsText = ""
+  for r in 0 ..< rows:
+    var line = "r" & $r & ":"
+    var current = -1
+    var count = 0
+    for c in 0 ..< cols:
+      let cell = s.cellAt(r, c)
+      if cell.width == 0: continue
+      let key = styleKey(cell)
+      var id = legend.find(key)
+      if id < 0:
+        legend.add key
+        id = legend.high
+      if id == current:
+        inc count
+      else:
+        if current >= 0: line.add " " & $current & "*" & $count
+        current = id
+        count = 1
+    if current >= 0: line.add " " & $current & "*" & $count
+    runsText.add line & "\n"
+  result = StylesHeader & " " & $rows & "x" & $cols & "\n"
+  for i, key in legend: result.add $i & " " & key & "\n"
+  result.add runsText
+
+proc parseStyles*(text: string): seq[seq[string]] =
+  ## `renderStyles`' text back as each row's cell styles. Raises
+  ## `ValueError` on text that is not in that format.
+  var legend: seq[string]
+  for raw in text.splitLines:
+    let line = raw.strip(leading = false)
+    if line.len == 0 or line.startsWith("#"): continue
+    if line.startsWith("r"):
+      let colon = line.find(':')
+      if colon < 0: raise newException(ValueError, "styles: no ':' in " & line)
+      var row: seq[string]
+      for run in strutils.splitWhitespace(line[colon + 1 .. ^1]):
+        let star = run.find('*')
+        if star < 0: raise newException(ValueError, "styles: bad run " & run)
+        let id = parseInt(run[0 ..< star])
+        if id < 0 or id >= legend.len:
+          raise newException(ValueError, "styles: style " & $id & " is not in the legend")
+        for _ in 0 ..< parseInt(run[star + 1 .. ^1]): row.add legend[id]
+      result.add row
+    else:
+      let space = line.find(' ')
+      if space < 0: raise newException(ValueError, "styles: bad legend line " & line)
+      if parseInt(line[0 ..< space]) != legend.len:
+        raise newException(ValueError, "styles: legend out of order at " & line)
+      legend.add line[space + 1 .. ^1]
+
+proc styleDiffs*(golden, actual: string; limit = 12): seq[string] =
+  ## Where two `renderStyles` texts disagree, cell by cell: at most `limit`
+  ## named cells, then a count of the rest.
+  let g = parseStyles(golden)
+  let a = parseStyles(actual)
+  if g.len != a.len:
+    return @["styles: " & $g.len & " rows in the golden, " & $a.len & " now"]
+  var extra = 0
+  for r in 0 ..< g.len:
+    for c in 0 ..< max(g[r].len, a[r].len):
+      let gk = if c < g[r].len: g[r][c] else: "<none>"
+      let ak = if c < a[r].len: a[r][c] else: "<none>"
+      if gk != ak:
+        if result.len < limit:
+          result.add "cell (" & $r & "," & $c & "): golden " & gk & ", now " & ak
+        else:
+          inc extra
+  if extra > 0: result.add "... and " & $extra & " more cells"
+
+proc shouldRecord*(): bool
+
+proc styledSnapshotDiffs*(s: Screen; dir: string): seq[string] =
+  ## Compare `s` with the styled snapshot in `dir` (`plaintext.txt`,
+  ## `styles.txt`): empty when both agree. Writes the two files instead, and
+  ## reports nothing, when `SNAP_RECORD=1` or when `dir` holds no snapshot
+  ## yet -- the same rule as `snap`. A plaintext difference is reported by
+  ## row, a style difference by cell.
+  let plain = renderPlain(s)
+  let styles = renderStyles(s)
+  if shouldRecord() or not fileExists(dir / snapPlainText) or
+      not fileExists(dir / snapStyles):
+    createDir(dir)
+    writeFile(dir / snapPlainText, plain)
+    writeFile(dir / snapStyles, styles)
+    return
+  let goldenPlain = readFile(dir / snapPlainText)
+  if goldenPlain != plain:
+    let lg = goldenPlain.splitLines()
+    let la = plain.splitLines()
+    for i in 0 ..< max(lg.len, la.len):
+      let g = if i < lg.len: lg[i] else: ""
+      let a = if i < la.len: la[i] else: ""
+      if g != a: result.add "row " & $i & ":\n  golden: " & g & "\n  now:    " & a
+  let goldenStyles = readFile(dir / snapStyles)
+  if goldenStyles != styles:
+    try:
+      result.add styleDiffs(goldenStyles, styles)
+    except ValueError as e:
+      result.add "styles.txt in " & dir & " is unreadable: " & e.msg
+
+proc xmlEscape(s: string): string =
+  s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+proc resolved(c: Color; fallback: string): string =
+  case c.kind
+  of ckRgb: colourSpelling(c)
+  of ckIndexed:
+    # The xterm palette (https://invisible-island.net/xterm/xterm.faq.html#color_by_number):
+    # the 16 system colours, the 6x6x6 cube and the grey ramp.
+    const System = ["#000000", "#cd0000", "#00cd00", "#cdcd00", "#0000ee", "#cd00cd",
+                    "#00cdcd", "#e5e5e5", "#7f7f7f", "#ff0000", "#00ff00", "#ffff00",
+                    "#5c5cff", "#ff00ff", "#00ffff", "#ffffff"]
+    let i = int(c.idx)
+    if i < 16: System[i]
+    elif i < 232:
+      let k = i - 16
+      proc level(v: int): int = (if v == 0: 0 else: 55 + 40 * v)
+      "#" & toHex(level(k div 36), 2).toLowerAscii & toHex(level((k div 6) mod 6), 2).toLowerAscii &
+        toHex(level(k mod 6), 2).toLowerAscii
+    else:
+      let v = 8 + 10 * (i - 232)
+      "#" & toHex(v, 2).toLowerAscii & toHex(v, 2).toLowerAscii & toHex(v, 2).toLowerAscii
+  of ckDefault: fallback
+
+proc renderColourSvg*(s: Screen; defaultFg = "#eeeeee"; defaultBg = "#000000";
+                      cellW = 8; cellH = 16; fontSize = 13;
+                      fontFamily = "DejaVu Sans Mono, monospace"): string =
+  ## The screen drawn in its own colours: each cell's background as a
+  ## rectangle (runs of one colour merged), each glyph in its foreground at
+  ## its cell's position, bold as `font-weight: bold`, `reverse` swapping the
+  ## two, underline as a line under the cell. A cell `cellW` x `cellH`
+  ## pixels; the terminal's default colours are `defaultFg` / `defaultBg`.
+  let (rows, cols) = s.size()
+  let w = cols * cellW
+  let h = rows * cellH
+  result = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" & $w & "\" height=\"" & $h &
+           "\" font-family=\"" & fontFamily & "\" font-size=\"" & $fontSize & "\">\n"
+  result.add "<rect x=\"0\" y=\"0\" width=\"" & $w & "\" height=\"" & $h &
+             "\" fill=\"" & defaultBg & "\"/>\n"
+  proc colours(cell: Cell): (string, string) =
+    var fg = resolved(cell.fg, defaultFg)
+    var bg = resolved(cell.bg, defaultBg)
+    if caReverse in cell.attrs: swap(fg, bg)
+    (fg, bg)
+  for r in 0 ..< rows:
+    var c = 0
+    while c < cols:
+      let (_, bg) = colours(s.cellAt(r, c))
+      var e = c + 1
+      while e < cols and colours(s.cellAt(r, e))[1] == bg: inc e
+      if bg != defaultBg:
+        result.add "<rect x=\"" & $(c * cellW) & "\" y=\"" & $(r * cellH) & "\" width=\"" &
+                   $((e - c) * cellW) & "\" height=\"" & $cellH & "\" fill=\"" & bg & "\"/>\n"
+      c = e
+  for r in 0 ..< rows:
+    for c in 0 ..< cols:
+      let cell = s.cellAt(r, c)
+      if cell.width == 0: continue
+      let (fg, _) = colours(cell)
+      if cell.underline != usNone:
+        result.add "<rect x=\"" & $(c * cellW) & "\" y=\"" & $(r * cellH + cellH - 2) &
+                   "\" width=\"" & $(max(1, cell.width) * cellW) & "\" height=\"1\" fill=\"" & fg & "\"/>\n"
+      if cell.rune.int32 == 0 or cell.rune.int32 == 32: continue
+      result.add "<text x=\"" & $(c * cellW) & "\" y=\"" & $(r * cellH + cellH - 4) &
+                 "\" fill=\"" & fg & "\"" &
+                 (if caBold in cell.attrs: " font-weight=\"bold\"" else: "") &
+                 ">" & xmlEscape($cell.rune) & "</text>\n"
   result.add "</svg>\n"
 
 proc renderTreedump*(s: Screen): string =

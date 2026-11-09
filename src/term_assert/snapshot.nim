@@ -233,6 +233,10 @@ proc styleKey*(cell: Cell): string =
   if caConceal in cell.attrs: result.add "+conceal"
   if caStrike in cell.attrs: result.add "+strike"
   if cell.underline != usNone: result.add "+underline:" & $cell.underline
+  # The underline's own colour (SGR 58), only when it has one: a file
+  # recorded before it was read says the same of every other cell.
+  if cell.underlineColor.kind != ckDefault:
+    result.add "+ul:" & colourSpelling(cell.underlineColor)
 
 const StylesHeader = "# TermAssert styles v1"
 
@@ -375,14 +379,34 @@ proc resolved(c: Color; fallback: string): string =
       "#" & toHex(v, 2).toLowerAscii & toHex(v, 2).toLowerAscii & toHex(v, 2).toLowerAscii
   of ckDefault: fallback
 
+proc blockRect(code: int32): tuple[ok: bool; x0, y0, x1, y1: int] =
+  ## The part of its cell a block element fills, in eighths
+  ## (https://www.unicode.org/charts/PDF/U2580.pdf): upper half, lower
+  ## eighths, full, left eighths, right half, upper and right eighth.
+  case code
+  of 0x2580: (true, 0, 0, 8, 4)                              # ▀
+  of 0x2581 .. 0x2587: (true, 0, 8 - int(code - 0x2580), 8, 8) # ▁ … ▇
+  of 0x2588: (true, 0, 0, 8, 8)                              # █
+  of 0x2589 .. 0x258F: (true, 0, 0, 8 - int(code - 0x2588), 8) # ▉ … ▏
+  of 0x2590: (true, 4, 0, 8, 8)                              # ▐
+  of 0x2594: (true, 0, 0, 8, 1)                              # ▔
+  of 0x2595: (true, 7, 0, 8, 8)                              # ▕
+  else: (false, 0, 0, 0, 0)
+
 proc renderColourSvg*(s: Screen; defaultFg = "#eeeeee"; defaultBg = "#000000";
                       cellW = 8; cellH = 16; fontSize = 13;
                       fontFamily = "DejaVu Sans Mono, monospace"): string =
   ## The screen drawn in its own colours: each cell's background as a
   ## rectangle (runs of one colour merged), each glyph in its foreground at
   ## its cell's position, bold as `font-weight: bold`, `reverse` swapping the
-  ## two, underline as a line under the cell. A cell `cellW` x `cellH`
-  ## pixels; the terminal's default colours are `defaultFg` / `defaultBg`.
+  ## two, underline as a line under the cell (in its own colour, two pixels,
+  ## when SGR 58 gave it one). A cell `cellW` x `cellH` pixels; the
+  ## terminal's default colours are `defaultFg` / `defaultBg`.
+  ##
+  ## The block elements a terminal fills its cells with (U+2580-U+2590,
+  ## U+2594, U+2595: halves, eighths) are drawn as the rectangles they
+  ## name, as a terminal draws them, not as font glyphs: a font's glyph does
+  ## not meet its neighbour's, and a row of them showed seams.
   let (rows, cols) = s.size()
   let w = cols * cellW
   let h = rows * cellH
@@ -411,9 +435,22 @@ proc renderColourSvg*(s: Screen; defaultFg = "#eeeeee"; defaultBg = "#000000";
       if cell.width == 0: continue
       let (fg, _) = colours(cell)
       if cell.underline != usNone:
-        result.add "<rect x=\"" & $(c * cellW) & "\" y=\"" & $(r * cellH + cellH - 2) &
-                   "\" width=\"" & $(max(1, cell.width) * cellW) & "\" height=\"1\" fill=\"" & fg & "\"/>\n"
+        let coloured = cell.underlineColor.kind != ckDefault
+        let ink = if coloured: resolved(cell.underlineColor, fg) else: fg
+        let thick = if coloured: 2 else: 1
+        result.add "<rect x=\"" & $(c * cellW) & "\" y=\"" & $(r * cellH + cellH - 1 - thick) &
+                   "\" width=\"" & $(max(1, cell.width) * cellW) & "\" height=\"" & $thick &
+                   "\" fill=\"" & ink & "\"/>\n"
       if cell.rune.int32 == 0 or cell.rune.int32 == 32: continue
+      let blk = blockRect(cell.rune.int32)
+      if blk.ok:
+        let x0 = c * cellW + cellW * blk.x0 div 8
+        let x1 = c * cellW + cellW * blk.x1 div 8
+        let y0 = r * cellH + cellH * blk.y0 div 8
+        let y1 = r * cellH + cellH * blk.y1 div 8
+        result.add "<rect x=\"" & $x0 & "\" y=\"" & $y0 & "\" width=\"" & $(x1 - x0) &
+                   "\" height=\"" & $(y1 - y0) & "\" fill=\"" & fg & "\"/>\n"
+        continue
       result.add "<text x=\"" & $(c * cellW) & "\" y=\"" & $(r * cellH + cellH - 4) &
                  "\" fill=\"" & fg & "\"" &
                  (if caBold in cell.attrs: " font-weight=\"bold\"" else: "") &

@@ -104,4 +104,34 @@ suite "styled snapshot":
     check svg.contains("<rect x=\"8\" y=\"0\" width=\"8\" height=\"16\" fill=\"#eeeeee\"/>")
     check svg.contains("fill=\"#000000\">B</text>")
 
+  test "an underline's own colour (SGR 58) is a style of its own":
+    let s = screenOf(1, 6, "\x1b[4;58:2::91:91:214mab\x1b[59mcd\x1b[0mef")
+    let rows = parseStyles(renderStyles(s))
+    check rows[0][0] == "default/default+underline:usSingle+ul:#5b5bd6"
+    check rows[0][1] == rows[0][0]
+    check rows[0][2] == "default/default+underline:usSingle"
+    check rows[0][4] == "default/default"
+    let dir = tmpRoot / "underline-colour"
+    discard styledSnapshotDiffs(s, dir)
+    let plain = screenOf(1, 6, "\x1b[4mabcd\x1b[0mef")
+    let diffs = styledSnapshotDiffs(plain, dir)
+    check diffs.len >= 1
+    check diffs[0].contains("cell (0,0)") and diffs[0].contains("+ul:#5b5bd6")
+
+  test "renderColourSvg draws a coloured underline in its colour":
+    let s = screenOf(1, 4, "\x1b[4;58:2::91:91:214mA\x1b[59mB\x1b[0m")
+    let svg = renderColourSvg(s, defaultFg = "#eeeeee", defaultBg = "#000000")
+    check svg.contains("<rect x=\"0\" y=\"13\" width=\"8\" height=\"2\" fill=\"#5b5bd6\"/>")
+    check svg.contains("<rect x=\"8\" y=\"14\" width=\"8\" height=\"1\" fill=\"#eeeeee\"/>")
+
+  test "renderColourSvg fills block elements as rectangles, not glyphs":
+    # ▀ upper half, ▎ left quarter, █ full: drawn edge to edge, no font.
+    let s = screenOf(1, 4, "\x1b[38;2;0;255;0m\xE2\x96\x80\xE2\x96\x80\xE2\x96\x8E\xE2\x96\x88\x1b[0m")
+    let svg = renderColourSvg(s, defaultFg = "#eeeeee", defaultBg = "#000000")
+    check svg.contains("<rect x=\"0\" y=\"0\" width=\"8\" height=\"8\" fill=\"#00ff00\"/>")
+    check svg.contains("<rect x=\"8\" y=\"0\" width=\"8\" height=\"8\" fill=\"#00ff00\"/>")
+    check svg.contains("<rect x=\"16\" y=\"0\" width=\"2\" height=\"16\" fill=\"#00ff00\"/>")
+    check svg.contains("<rect x=\"24\" y=\"0\" width=\"8\" height=\"16\" fill=\"#00ff00\"/>")
+    check not svg.contains("\xE2\x96\x80</text>")
+
 removeDir(tmpRoot)

@@ -35,9 +35,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `eph-linux-x64` was retired by infra RC5 (#1537); the Linux x64 leg
+          # uses the fleet's current `[self-hosted, linux, x64]` class.
           - os: linux
             arch: x64
-            runner: eph-linux-x64
+            runner: [self-hosted, linux, x64]
           - os: linux
             arch: arm64
             runner: eph-linux-arm64
@@ -53,6 +55,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+
+      # The cross-check steps run `just` on the runner. The Windows arm64 runner
+      # does not have it on PATH ("The term 'just' is not recognized"), so it is
+      # installed here, as the lint job already does.
+      - uses: extractions/setup-just@v2
 
       # Mint a GitHub App installation token via the CI Token Provider
       # app so the reprobuild flake/sibling steps can clone private

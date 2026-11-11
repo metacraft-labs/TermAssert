@@ -56,6 +56,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The cross-check steps run `just` on the runner. The Windows arm64 runner
+      # does not have it on PATH ("The term 'just' is not recognized"), so it is
+      # installed here, as the lint job already does.
+      - uses: extractions/setup-just@v2
+
       # Mint a GitHub App installation token via the CI Token Provider
       # app so the reprobuild flake/sibling steps can clone private
       # metacraft-labs repos (codetracer-native-recorder, runquota,

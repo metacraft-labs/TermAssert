@@ -62,12 +62,19 @@ jobs:
           retention-days: 30
 
   test:
-    name: Test (${{ matrix.os }}, orc/release/threads:on)
-    runs-on: ${{ matrix.os }}
+    name: Test (${{ matrix.name }}, orc/release/threads:on)
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [eph-linux-x64, eph-macos-arm64]
+        # `eph-linux-x64` was retired by infra RC5 (#1537): the alias bridge was
+        # dropped from every GARM pool, so a job naming it queues forever. The
+        # Linux leg uses the fleet's current `[self-hosted, linux, x64]` class.
+        include:
+          - name: linux-x64
+            runner: [self-hosted, linux, x64]
+          - name: eph-macos-arm64
+            runner: eph-macos-arm64
     steps:
       # The manifest repo holding the workspace locks (metacraft-manifests) is
       # private, so `secrets.GITHUB_TOKEN` cannot read it. Mint an installation
@@ -94,7 +101,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-logs-${{ matrix.os }}
+          name: test-logs-${{ matrix.name }}
           path: test-logs/
           retention-days: 30
 

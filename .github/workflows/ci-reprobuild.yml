@@ -35,9 +35,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `eph-linux-x64` was retired by infra RC5 (#1537); the Linux x64 leg
+          # uses the fleet's current `[self-hosted, linux, x64]` class.
           - os: linux
             arch: x64
-            runner: eph-linux-x64
+            runner: [self-hosted, linux, x64]
           - os: linux
             arch: arm64
             runner: eph-linux-arm64

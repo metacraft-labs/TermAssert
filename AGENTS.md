@@ -30,7 +30,10 @@ synchronized output, kitty keyboard, mouse 1006/1016).
   `keyBytes(name, mode)` gives the bytes for any mode and `keyBytes(name)` the
   legacy ones. A combination the active encoding cannot express (Ctrl+Shift+K in
   legacy mode, a Kitty flag beyond disambiguate) raises `KeyEncodingError`; a
-  modifier is never dropped.
+  modifier is never dropped. Key names are case-insensitive, a letter after a
+  modifier included: `Alt+T` is Alt+t, as menus write it, and Shift is spelled
+  when it is meant (`Alt+Shift+T`). Only a capital letter on its own
+  (`sendKey("A")`) is the shifted character, the way it is typed.
 - Block on conditions (`waitForText`, `waitForRegionChange`,
   `waitForNotification`, ...).
 - Receive screenshot / exit / ping requests from the child via a Unix

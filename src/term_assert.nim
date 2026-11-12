@@ -515,6 +515,12 @@ proc splitModifiers(name: string): tuple[key: string; ctrl, alt, shift: bool] =
     else: break
   (key, ctrl, alt, shift)
 
+proc typedCapital(name: string): bool =
+  ## `name` is a capital letter on its own: the character typed, Shift+letter.
+  ## After a modifier a capital names the letter's key (`alt+T` is Alt+t, as
+  ## menus and keymaps write it); a chord with Shift spells it (`alt+shift+t`).
+  name.len == 1 and name[0] in {'A'..'Z'}
+
 proc keyBytes*(name: string): string =
   ## The bytes a terminal (xterm) sends in its DEFAULT, legacy encoding for a
   ## key name with optional `ctrl+`, `alt+`, `shift+` prefixes. Modifiers on
@@ -522,6 +528,10 @@ proc keyBytes*(name: string): string =
   ## alt 2, ctrl 4); Shift on a letter is its capital; Ctrl on a letter is its
   ## control character; Alt prefixes ESC. A combination with no encoding
   ## raises `KeyEncodingError` rather than dropping a modifier.
+  ##
+  ## Names are case-insensitive, and so is a letter after a modifier: `Alt+T`
+  ## is Alt+t, and Alt+Shift+T is spelled `alt+shift+t`. Only a capital letter
+  ## on its own (`"A"`) is the shifted character, the way it is typed.
   ##
   ## This is what a terminal sends to a child that asked for nothing. For the
   ## encoding a child that requested extended key reporting receives, see
@@ -577,9 +587,7 @@ proc keyBytes*(name: string): string =
     if key.len != 1:
       raise newException(ValueError, "unknown key: " & name)
     var c = key[0]
-    # the case of a single character comes from the original spelling
-    let orig = name[^1]
-    if orig in {'A'..'Z'}: c = orig
+    if typedCapital(name): c = name[0]
     if shift:
       if c in {'a'..'z'}: c = c.toUpperAscii
       elif c notin {'A'..'Z'}:
@@ -619,7 +627,7 @@ proc modifierParam(ctrl, alt, shift: bool): int =
 proc textKey(key, name: string): tuple[code: int; named, letter, upper: bool] =
   ## The code of a key the extended encodings report by its character —
   ## everything but the cursor, editing and function keys — or code -1.
-  ## `upper` is an upper-case letter spelled as such, which is Shift+letter.
+  ## `upper` is a capital letter on its own, which is Shift+letter.
   case key
   of "enter", "return": (13, true, false, false)
   of "tab": (9, true, false, false)
@@ -629,7 +637,7 @@ proc textKey(key, name: string): tuple[code: int; named, letter, upper: bool] =
   else:
     if key.len != 1: return (-1, false, false, false)
     let letter = key[0] in {'a'..'z'}
-    (ord(key[0]), false, letter, letter and name[^1] in {'A'..'Z'})
+    (ord(key[0]), false, letter, typedCapital(name))
 
 proc noEncoding(name, why: string): ref KeyEncodingError =
   newException(KeyEncodingError, "no terminal encoding for " & name & why)
@@ -752,8 +760,10 @@ proc keyMode*(s: var TuiTestSession): KeyMode =
 
 proc sendKey*(s: var TuiTestSession; name: string) =
   ## Send a named key ("up", "f5", "enter", a single character) with optional
-  ## `ctrl+`, `alt+` and `shift+` prefixes, encoded as a terminal does in the
-  ## key reporting mode the child has requested (see `keyBytes(name, mode)`):
+  ## `ctrl+`, `alt+` and `shift+` prefixes (case-insensitive: `Alt+T` is
+  ## Alt+t; Shift is always spelled, `Alt+Shift+T`), encoded as a terminal
+  ## does in the key reporting mode the child has requested (see
+  ## `keyBytes(name, mode)`):
   ## legacy xterm bytes when it asked for nothing, xterm's `modifyOtherKeys`
   ## form after `CSI > 4 ; 2 m`, the Kitty protocol's after `CSI > 1 u`.
   ## Raises `KeyEncodingError` for a combination that mode cannot express;

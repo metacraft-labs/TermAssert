@@ -50,7 +50,7 @@
 ## * Declares ``library term_assert`` so downstream consumers can express a
 ##   workspace dependency on this repo. The umbrella is
 ##   ``src/term_assert.nim`` (consumers ``import term_assert``); the
-##   submodules under ``src/term_assert/`` (``ipc``, ``snapshot``) are
+##   submodules under ``src/term_assert/`` (``ipc``, ``key_modes``, ``snapshot``) are
 ##   importable too.
 ## * Emits, per runnable test file under ``tests/``, a BUILD edge
 ##   (``buildNimUnittest.build``) that compiles ``build/test-bin/<stem>`` and
@@ -204,6 +204,8 @@ const posixHarnessSpecs: seq[HarnessTestSpec] = @[
     binary: "build/test-bin/test_harness_mouse_drag"),
   HarnessTestSpec(source: "tests/test_harness_key_modifiers.nim",
     binary: "build/test-bin/test_harness_key_modifiers"),
+  HarnessTestSpec(source: "tests/test_harness_key_modes.nim",
+    binary: "build/test-bin/test_harness_key_modes"),
   HarnessTestSpec(source: "tests/test_harness_hyperlink_assertion.nim",
     binary: "build/test-bin/test_harness_hyperlink_assertion"),
   HarnessTestSpec(source: "tests/test_harness_notification_received.nim",

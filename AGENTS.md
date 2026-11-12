@@ -19,6 +19,18 @@ synchronized output, kitty keyboard, mouse 1006/1016).
   motion with a button held, 1003 for any motion; otherwise `MouseTrackingError` is
   raised, because a real terminal would not report it. `mouseTracking()` says what
   the child enabled.
+- Send named keys with modifiers (`sendKey("ctrl+alt+j")`, `sendKey("shift+f5")`)
+  encoded the way a terminal encodes them for THIS child. The harness follows the
+  key reporting the child requested in its output: xterm's `modifyOtherKeys` level 2
+  (`CSI > 4 ; 2 m`) turns a modified key into `CSI 27 ; m ; code ~`
+  (Ctrl+Alt+J is `\e[27;7;106~`), the Kitty keyboard protocol's disambiguate flag
+  (`CSI > 1 u`, with its push / pop / set stack) into `CSI code ; m u`
+  (`\e[106;7u`), and a child that asked for nothing — or took its request back —
+  gets xterm's legacy bytes. `keyMode()` says what the child requested,
+  `keyBytes(name, mode)` gives the bytes for any mode and `keyBytes(name)` the
+  legacy ones. A combination the active encoding cannot express (Ctrl+Shift+K in
+  legacy mode, a Kitty flag beyond disambiguate) raises `KeyEncodingError`; a
+  modifier is never dropped.
 - Block on conditions (`waitForText`, `waitForRegionChange`,
   `waitForNotification`, ...).
 - Receive screenshot / exit / ping requests from the child via a Unix
@@ -66,6 +78,7 @@ just bench           # spawn-1000-keys benchmark (target < 200 ms)
 src/
   term_assert.nim                  # public top-level - builder + session
   term_assert/ipc.nim              # Unix-socket IPC server
+  term_assert/key_modes.nim        # key reporting the child requested
   term_assert/snapshot.nim         # six-format golden writer
 tests/
   test_harness_*.nim               # real-stack integration tests

@@ -44,10 +44,12 @@ import nim_pty
 import nim_libvterm
 
 import term_assert/ipc
+import term_assert/key_modes
 import term_assert/snapshot
 
 export options, times, tables
 export ipc, snapshot
+export key_modes.KeyMode
 export nim_libvterm except Screen
 # (Screen is re-exported through `session.screen()` accessor; not a
 # copyable value, so callers always go through the accessor.)
@@ -98,6 +100,9 @@ type
     transcriptOn: bool
     transcriptBuf: string
     transcriptDropped: int
+    keyModes: KeyModeTracker
+      ## The key reporting the child requested (xterm `modifyOtherKeys`,
+      ## the Kitty keyboard protocol), followed across every byte it writes.
 
   TimeoutError* = object of CatchableError
   AssertionFailedError* = object of CatchableError
@@ -235,6 +240,7 @@ proc spawn*(b: TuiTestBuilder): TuiTestSession =
   sess.transcriptOn = b.recordTranscript
   sess.transcriptBuf = ""
   sess.transcriptDropped = 0
+  sess.keyModes = initKeyModeTracker()
   sess.ipc = startIpcServer()
   let env = effectiveEnv(b, sess.ipc.socketPath)
   let opts = SpawnOptions(cols: b.cols, rows: b.rows, cwd: b.cwd)
@@ -261,9 +267,9 @@ proc spawn*(b: TuiTestBuilder): TuiTestSession =
 proc recordBytes(s: var TuiTestSession; chunk: openArray[byte]) =
   ## Append one pty read to the transcript, when one is being kept.
   ##
-  ## EVERY BYTE THE HARNESS READS PASSES THROUGH HERE, at the same three call
-  ## sites that feed libvterm, so the transcript and the parsed screen can
-  ## never be built from different data.
+  ## EVERY BYTE THE HARNESS READS PASSES THROUGH HERE, from `ingest`, which
+  ## also feeds libvterm, so the transcript and the parsed screen can never be
+  ## built from different data.
   if not s.transcriptOn:
     return
   if s.transcriptBuf.len + chunk.len > TranscriptCapBytes:
@@ -273,6 +279,13 @@ proc recordBytes(s: var TuiTestSession; chunk: openArray[byte]) =
   s.transcriptBuf.setLen(start + chunk.len)
   for i, b in chunk:
     s.transcriptBuf[start + i] = char(b)
+
+proc ingest(s: var TuiTestSession; chunk: openArray[byte]) =
+  ## One pty read: into the transcript, the key-mode tracker and libvterm.
+  ## The single path every byte the harness reads takes.
+  s.recordBytes(chunk)
+  s.keyModes.feed(chunk)
+  s.screen.feed(chunk)
 
 proc handleIpcCommands(s: var TuiTestSession) =
   ## Drain pending IPC commands and respond. Each `screenshot` request
@@ -309,8 +322,7 @@ proc pump(s: var TuiTestSession; budgetMs: int): int =
     if rem.inMilliseconds <= 0:
       let chunk = readBytes(s.pty, 4096, initDuration(milliseconds = 0))
       if chunk.len == 0: break
-      s.recordBytes(chunk)
-      s.screen.feed(chunk)
+      s.ingest(chunk)
       result += chunk.len
       handleIpcCommands(s)
       continue
@@ -320,8 +332,7 @@ proc pump(s: var TuiTestSession; budgetMs: int): int =
       handleIpcCommands(s)
       if not isAlive(s.pty): break
       continue
-    s.recordBytes(chunk)
-    s.screen.feed(chunk)
+    s.ingest(chunk)
     result += chunk.len
     handleIpcCommands(s)
 
@@ -334,8 +345,7 @@ proc drainOutput*(s: var TuiTestSession; idleMs: int = 30): int =
     let chunk = readBytes(s.pty, 4096, initDuration(milliseconds = idleMs))
     handleIpcCommands(s)
     if chunk.len > 0:
-      s.recordBytes(chunk)
-      s.screen.feed(chunk)
+      s.ingest(chunk)
       result += chunk.len
       lastActivity = getMonoTime()
     else:
@@ -491,13 +501,8 @@ type
     ## Raised for a key with modifiers no terminal encoding expresses: the key
     ## is never sent without them.
 
-proc keyBytes*(name: string): string =
-  ## The bytes a terminal (xterm) sends for a key name with optional
-  ## `ctrl+`, `alt+`, `shift+` prefixes. Modifiers on cursor, editing and
-  ## function keys use xterm's parameter (1 + shift 1, alt 2, ctrl 4);
-  ## Shift on a letter is its capital; Ctrl on a letter is its control
-  ## character; Alt prefixes ESC. A combination with no encoding raises
-  ## `KeyEncodingError` rather than dropping a modifier.
+proc splitModifiers(name: string): tuple[key: string; ctrl, alt, shift: bool] =
+  ## `name` lower-cased and stripped of its `ctrl+`, `alt+`, `shift+` prefixes.
   var key = name.toLowerAscii()
   var ctrl, alt, shift = false
   while true:
@@ -508,6 +513,20 @@ proc keyBytes*(name: string): string =
     elif key.startsWith("shift+"):
       shift = true; key = key[6 .. ^1]
     else: break
+  (key, ctrl, alt, shift)
+
+proc keyBytes*(name: string): string =
+  ## The bytes a terminal (xterm) sends in its DEFAULT, legacy encoding for a
+  ## key name with optional `ctrl+`, `alt+`, `shift+` prefixes. Modifiers on
+  ## cursor, editing and function keys use xterm's parameter (1 + shift 1,
+  ## alt 2, ctrl 4); Shift on a letter is its capital; Ctrl on a letter is its
+  ## control character; Alt prefixes ESC. A combination with no encoding
+  ## raises `KeyEncodingError` rather than dropping a modifier.
+  ##
+  ## This is what a terminal sends to a child that asked for nothing. For the
+  ## encoding a child that requested extended key reporting receives, see
+  ## `keyBytes(name, mode)`; `sendKey` uses the one the child asked for.
+  let (key, ctrl, alt, shift) = splitModifiers(name)
   let m = 1 + (if shift: 1 else: 0) + (if alt: 2 else: 0) + (if ctrl: 4 else: 0)
   let modified = m > 1
   proc csi(final: char): string =
@@ -575,12 +594,171 @@ proc keyBytes*(name: string): string =
       else: raise newException(KeyEncodingError, "no terminal encoding for " & name)
     (if alt: "\x1b" else: "") & $char(b)
 
+type
+  KeyEncoding* = enum
+    ## The encoding a terminal uses for modified keys.
+    keLegacy           ## xterm's default (`keyBytes(name)`)
+    keModifyOtherKeys  ## xterm `modifyOtherKeys` level 2: `CSI 27 ; m ; code ~`
+    keKitty            ## Kitty keyboard protocol, disambiguate flag: `CSI code ; m u`
+
+proc encoding*(mode: KeyMode): KeyEncoding =
+  ## Which encoding a terminal uses in `mode`. Kitty flags take precedence:
+  ## a terminal speaking the Kitty protocol is not also applying xterm's
+  ## resource. `modifyOtherKeys` level 1 is reported as `keLegacy`: at that
+  ## level xterm keeps the legacy bytes for every key the legacy encoding
+  ## expresses, and the few keys it changes are not modelled (they still
+  ## raise `KeyEncodingError`).
+  if mode.kittyFlags != 0: keKitty
+  elif mode.modifyOtherKeys == 2: keModifyOtherKeys
+  else: keLegacy
+
+proc modifierParam(ctrl, alt, shift: bool): int =
+  ## xterm's and Kitty's modifier parameter: 1 + shift 1 + alt 2 + ctrl 4.
+  1 + (if shift: 1 else: 0) + (if alt: 2 else: 0) + (if ctrl: 4 else: 0)
+
+proc textKey(key, name: string): tuple[code: int; named, letter, upper: bool] =
+  ## The code of a key the extended encodings report by its character —
+  ## everything but the cursor, editing and function keys — or code -1.
+  ## `upper` is an upper-case letter spelled as such, which is Shift+letter.
+  case key
+  of "enter", "return": (13, true, false, false)
+  of "tab": (9, true, false, false)
+  of "escape", "esc": (27, true, false, false)
+  of "backspace": (127, true, false, false)
+  of "space": (32, true, false, false)
+  else:
+    if key.len != 1: return (-1, false, false, false)
+    let letter = key[0] in {'a'..'z'}
+    (ord(key[0]), false, letter, letter and name[^1] in {'A'..'Z'})
+
+proc noEncoding(name, why: string): ref KeyEncodingError =
+  newException(KeyEncodingError, "no terminal encoding for " & name & why)
+
+proc otherKeysBytes(name: string): string =
+  ## xterm with `modifyOtherKeys` level 2.
+  let (key, ctrl, alt, shift0) = splitModifiers(name)
+  let t = textKey(key, name)
+  if t.code < 0: return keyBytes(name)
+  let shift = shift0 or t.upper
+  if not (ctrl or alt or shift): return keyBytes(name)
+  if key == "tab" and shift and not ctrl and not alt: return "\x1b[Z"
+  if key == "backspace" and ctrl:
+    raise noEncoding(name, " (xterm turns Ctrl+Backspace into the other erase character)")
+  if shift and not t.named and not t.letter:
+    raise noEncoding(name, " (send the shifted character itself)")
+  let code = (if t.letter: ord(if shift: key[0].toUpperAscii else: key[0]) else: t.code)
+  "\x1b[27;" & $modifierParam(ctrl, alt, shift) & ";" & $code & "~"
+
+proc kittyBytes(name: string): string =
+  ## A Kitty-protocol terminal with the disambiguate flag.
+  let (key, ctrl, alt, shift0) = splitModifiers(name)
+  if key == "backtab":
+    if ctrl or alt or shift0: raise noEncoding(name, "")
+    return "\x1b[9;2u"
+  let t = textKey(key, name)
+  if t.code < 0: return keyBytes(name)
+  let shift = shift0 or t.upper
+  if not (ctrl or alt or shift):
+    return (if t.code == 27: "\x1b[27u" else: keyBytes(name))
+  if shift and not ctrl and not alt:
+    if t.letter: return $key[0].toUpperAscii
+    if key == "space": return " "
+  if shift and not t.named and not t.letter:
+    raise noEncoding(name, " (send the shifted character itself)")
+  let m = modifierParam(ctrl, alt, shift)
+  "\x1b[" & $t.code & (if m > 1: ";" & $m else: "") & "u"
+
+proc keyBytes*(name: string; mode: KeyMode): string =
+  ## The bytes a terminal sends for `name` (as `keyBytes(name)` spells it)
+  ## when the application has requested the key reporting in `mode`.
+  ##
+  ## Cursor, editing and function keys are unchanged by both requests; they
+  ## keep xterm's `CSI 1 ; m A` / `CSI n ; m ~` forms. The keys that change
+  ## are the ones a terminal reports by their character: letters, digits,
+  ## punctuation, Space, Enter, Tab, Escape and Backspace.
+  ##
+  ## xterm, `modifyOtherKeys` level 2 (`CSI > 4 ; 2 m`): a key with any
+  ## modifier is `CSI 27 ; m ; code ~`, m = 1 + shift 1 + alt 2 + ctrl 4, code
+  ## the character the key produces — so Shift is part of the code as well as
+  ## of m (Ctrl+Shift+K is code 75, `K`). Measured against xterm 410:
+  ##
+  ## ================  ==================
+  ## ctrl+alt+j        `CSI 27;7;106~`
+  ## ctrl+shift+k      `CSI 27;6;75~`
+  ## ctrl+a            `CSI 27;5;97~`
+  ## alt+x             `CSI 27;3;120~`
+  ## shift+a, "A"      `CSI 27;2;65~`
+  ## ctrl+1            `CSI 27;5;49~`
+  ## ctrl+enter        `CSI 27;5;13~`
+  ## ctrl+tab          `CSI 27;5;9~`
+  ## shift+tab         `CSI Z` (unchanged)
+  ## shift+space       `CSI 27;2;32~`
+  ## alt+escape        `CSI 27;3;27~`
+  ## unmodified keys   unchanged
+  ## ================  ==================
+  ##
+  ## Alt+Backspace is `CSI 27;3;127~`: the code is the byte Backspace sends,
+  ## and this harness's Backspace is DEL. Ctrl+Backspace is refused, because
+  ## xterm turns it into the other erase character rather than reporting it.
+  ##
+  ## Kitty keyboard protocol with the disambiguate flag (`CSI > 1 u`): a key
+  ## with Ctrl or Alt is `CSI code ; m u`, code the UNSHIFTED key, Shift only
+  ## in m; Escape is always `CSI 27 u`; Enter, Tab and Backspace keep their
+  ## legacy byte unmodified and become `CSI 13/9/127 ; m u` with any modifier;
+  ## Shift alone on a letter or Space is still text. Measured against kitty
+  ## 0.45's encoder:
+  ##
+  ## ================  ==================
+  ## ctrl+alt+j        `CSI 106;7u`
+  ## ctrl+shift+k      `CSI 107;6u`
+  ## ctrl+a            `CSI 97;5u`
+  ## alt+shift+a       `CSI 97;4u`
+  ## shift+a, "A"      `A`
+  ## escape            `CSI 27u`
+  ## shift+enter       `CSI 13;2u`
+  ## shift+tab         `CSI 9;2u`
+  ## ctrl+space        `CSI 32;5u`
+  ## unmodified keys   unchanged (but Escape)
+  ## ================  ==================
+  ##
+  ## Kitty flags 2 (event types) and 16 (associated text) change no bytes for
+  ## a key press and are accepted alongside 1. Any other Kitty flag set —
+  ## report alternate keys (4), report all keys (8), or flags without
+  ## disambiguate — raises `KeyEncodingError`: those encodings are not
+  ## modelled, and guessing would send bytes no terminal sends.
+  ##
+  ## In every mode Shift on a digit or punctuation raises `KeyEncodingError`
+  ## (the shifted character depends on the keyboard layout: send it as text),
+  ## and so does any combination the mode cannot express. A modifier is never
+  ## dropped.
+  case mode.encoding
+  of keLegacy: keyBytes(name)
+  of keModifyOtherKeys: otherKeysBytes(name)
+  of keKitty:
+    const modelled = 1 or 2 or 16
+    if (mode.kittyFlags and 1) == 0 or (mode.kittyFlags and not modelled) != 0:
+      raise newException(KeyEncodingError, "the child set Kitty keyboard flags " &
+        $mode.kittyFlags & ", whose encoding TermAssert does not model; " & name &
+        " was not sent")
+    kittyBytes(name)
+
+proc keyMode*(s: var TuiTestSession): KeyMode =
+  ## The key reporting the child has requested so far — xterm
+  ## `modifyOtherKeys` level and the Kitty flags in force on its active
+  ## screen — read from every byte it has written (a request split across
+  ## two reads counts once it is complete).
+  discard pump(s, 0)
+  s.keyModes.keyMode()
+
 proc sendKey*(s: var TuiTestSession; name: string) =
   ## Send a named key ("up", "f5", "enter", a single character) with optional
-  ## `ctrl+`, `alt+` and `shift+` prefixes, encoded as a terminal does (see
-  ## `keyBytes`). Raises `KeyEncodingError` for a combination a terminal
-  ## cannot express; a modifier is never dropped.
-  s.send(keyBytes(name))
+  ## `ctrl+`, `alt+` and `shift+` prefixes, encoded as a terminal does in the
+  ## key reporting mode the child has requested (see `keyBytes(name, mode)`):
+  ## legacy xterm bytes when it asked for nothing, xterm's `modifyOtherKeys`
+  ## form after `CSI > 4 ; 2 m`, the Kitty protocol's after `CSI > 1 u`.
+  ## Raises `KeyEncodingError` for a combination that mode cannot express;
+  ## a modifier is never dropped.
+  s.send(keyBytes(name, s.keyMode()))
 
 type
   MouseTrackingError* = object of CatchableError

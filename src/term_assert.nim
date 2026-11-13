@@ -60,13 +60,15 @@ export nim_libvterm except Screen
 
 type
   MouseButton* = enum
-    mbLeft, mbMiddle, mbRight, mbWheelUp, mbWheelDown
+    mbLeft, mbMiddle, mbRight, mbWheelUp, mbWheelDown, mbWheelLeft, mbWheelRight
 
   KeyModifier* = enum
     kmShift, kmAlt, kmCtrl
 
   ScrollDir* = enum
-    sdUp, sdDown
+    sdUp, sdDown, sdLeft, sdRight
+      ## `sdLeft` / `sdRight`: a horizontal wheel or a tilted one (SGR buttons
+      ## 66 and 67, as xterm, kitty and WezTerm report them).
 
   TuiTestBuilder* = object
     ## Fluent builder for spawning a harness session.
@@ -788,6 +790,8 @@ proc buttonCode(button: MouseButton): int =
   of mbRight: 2
   of mbWheelUp: 64
   of mbWheelDown: 65
+  of mbWheelLeft: 66
+  of mbWheelRight: 67
 
 proc modifierBits(modifiers: set[KeyModifier]): int =
   (if kmShift in modifiers: 4 else: 0) or (if kmAlt in modifiers: 8 else: 0) or
@@ -864,8 +868,32 @@ proc sendMouseClick*(s: var TuiTestSession; row, col: int;
   s.sendMouseRelease(row, col, button, modifiers)
 
 proc sendMouseScroll*(s: var TuiTestSession; row, col: int; direction: ScrollDir) =
-  let btn = if direction == sdUp: mbWheelUp else: mbWheelDown
+  let btn = case direction
+    of sdUp: mbWheelUp
+    of sdDown: mbWheelDown
+    of sdLeft: mbWheelLeft
+    of sdRight: mbWheelRight
   s.sendMouseClick(row, col, btn)
+
+type
+  FocusReportingError* = object of CatchableError
+    ## Raised when a focus change is to be reported to a child that did not
+    ## ask for focus reports (DEC 1004): a real terminal would not send one.
+
+proc focusReporting*(s: var TuiTestSession): bool =
+  ## Whether the child asked for focus reports (`CSI ? 1004 h`).
+  discard pump(s, 0)
+  s.screen.focusReportEnabled()
+
+proc sendFocus*(s: var TuiTestSession; focused: bool) =
+  ## The report a terminal writes when its window gains (`CSI I`) or loses
+  ## (`CSI O`) the focus. libvterm has no window to focus, so this is the
+  ## byte sequence the terminal would write
+  ## (https://invisible-island.net/xterm/ctlseqs/ctlseqs.html, FocusIn/FocusOut).
+  if not s.focusReporting():
+    raise newException(FocusReportingError,
+      "the application did not ask for focus reports (DEC 1004)")
+  s.send(if focused: "\e[I" else: "\e[O")
 
 # ---------------------------------------------------------------------------
 # Synchronization

@@ -1,27 +1,27 @@
-# ta1 mutation results — 2026-11-12 15:47:36 +0200
-# kill command: bash -euo pipefail -c for t in test_harness_mouse_drag test_harness_mouse_events; do nim c -r --hints:off --passC:-w --path:src --path:tests --path:../nim-pty/src --path:../nim-libvterm/src --path:../TermAssertClient/src --mm:orc -d:release --threads:on --nimcache:${BUILD_DIR}/nc-$t -o:${BUILD_DIR}/$t tests/$t.nim; done
+# ta1 mutation results — 2026-11-13 07:31:45 +0200
+# kill command: bash -euo pipefail -c for t in test_harness_mouse_drag test_harness_mouse_events; do nim c -r --hints:off --passC:-w --path:src --path:tests --path:/tmp/p66/m/nim-pty/src --path:/tmp/p66/m/nim-libvterm/src --path:/tmp/p66/m/TermAssertClient/src --mm:orc -d:release --threads:on --nimcache:${BUILD_DIR}/nc-$t -o:${BUILD_DIR}/$t tests/$t.nim; done
 
-KILLED   M1       26.2s  motion reported without the +32 motion bit
+KILLED   M1       16.7s  motion reported without the +32 motion bit
            |   [FAILED] any-motion tracking: a motion with no button held
            |   [OK] a click is unchanged: press and release at one cell
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_mouse_drag'
-KILLED   M2       21.9s  the release terminated with M
+KILLED   M2       16.0s  the release terminated with M
            |     want was ^[[<0;6;4M^[[<0;6;4m
            |   [FAILED] a click is unchanged: press and release at one cell
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_mouse_drag'
-KILLED   M3       26.3s  column and row swapped
+KILLED   M3       17.9s  column and row swapped
            |     want was ^[[<0;6;4M^[[<0;6;4m
            |   [FAILED] a click is unchanged: press and release at one cell
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_mouse_drag'
-KILLED   M4       16.9s  the Shift bit dropped
+KILLED   M4        7.5s  the Shift bit dropped
            |   [OK] any-motion tracking: a motion with no button held
            |   [OK] a click is unchanged: press and release at one cell
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_mouse_drag'
-KILLED   M5       12.1s  the tracking check removed
+KILLED   M5        9.4s  the tracking check removed
            |   [OK] any-motion tracking: a motion with no button held
            |   [OK] a click is unchanged: press and release at one cell
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_mouse_drag'
-KILLED   M6       15.7s  an intermediate cell skipped
+KILLED   M6       10.9s  an intermediate cell skipped
            |   [OK] any-motion tracking: a motion with no button held
            |   [OK] a click is unchanged: press and release at one cell
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_mouse_drag'

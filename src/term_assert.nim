@@ -81,6 +81,7 @@ type
     cwd: string
     inheritEnv: bool
     recordTranscript: bool
+    answerQueries: bool
 
   ScreenSnapshot* = object
     label*: string
@@ -102,6 +103,9 @@ type
     transcriptOn: bool
     transcriptBuf: string
     transcriptDropped: int
+    answering: bool
+      ## Whether the emulator's answers to the child's queries are written
+      ## back to it (`answerQueries`).
     keyModes: KeyModeTracker
       ## The key reporting the child requested (xterm `modifyOtherKeys`,
       ## the Kitty keyboard protocol), followed across every byte it writes.
@@ -175,6 +179,24 @@ proc transcript*(b: TuiTestBuilder; on = true): TuiTestBuilder =
   result = b
   result.recordTranscript = on
 
+proc answerQueries*(b: TuiTestBuilder; on = true): TuiTestBuilder =
+  ## Answer the child's queries as a real terminal does: what the emulator
+  ## replies to Primary and Secondary Device Attributes (`CSI c`, `CSI > c`),
+  ## the cursor position report (`CSI 6 n`, and DECXCPR `CSI ? 6 n`), DSR 5,
+  ## DECRQM, DECRQSS and XTVERSION is written back to the child's input as
+  ## soon as the query has been read, in the order asked. The answers are
+  ## libvterm's (`nim_libvterm.takeReplies`), so XTVERSION names libvterm and
+  ## the background-colour query (`OSC 11`), which libvterm does not answer,
+  ## stays unanswered.
+  ##
+  ## OFF BY DEFAULT: until this existed the harness's terminal answered
+  ## nothing, and suites that decide what a terminal "that never answers" is
+  ## given were written against that. An application that waits for its
+  ## queries to come back (a reply window, a DA1 fence) runs here exactly as
+  ## it would on such a terminal unless this is on.
+  result = b
+  result.answerQueries = on
+
 # ---------------------------------------------------------------------------
 # Spawn
 # ---------------------------------------------------------------------------
@@ -240,6 +262,7 @@ proc spawn*(b: TuiTestBuilder): TuiTestSession =
   sess.rxBuf = @[]
   sess.closed = false
   sess.transcriptOn = b.recordTranscript
+  sess.answering = b.answerQueries
   sess.transcriptBuf = ""
   sess.transcriptDropped = 0
   sess.keyModes = initKeyModeTracker()
@@ -283,11 +306,17 @@ proc recordBytes(s: var TuiTestSession; chunk: openArray[byte]) =
     s.transcriptBuf[start + i] = char(b)
 
 proc ingest(s: var TuiTestSession; chunk: openArray[byte]) =
-  ## One pty read: into the transcript, the key-mode tracker and libvterm.
+  ## One pty read: into the transcript, the key-mode tracker and libvterm,
+  ## and the emulator's answers back to the child when it answers queries.
   ## The single path every byte the harness reads takes.
   s.recordBytes(chunk)
   s.keyModes.feed(chunk)
   s.screen.feed(chunk)
+  # The emulator queues its answers while it parses the queries; they are
+  # always taken, so a session that does not answer never fills the queue.
+  let replies = s.screen.takeReplies()
+  if s.answering and replies.len > 0:
+    s.pty.write(toOpenArrayByte(replies, 0, replies.high))
 
 proc handleIpcCommands(s: var TuiTestSession) =
   ## Drain pending IPC commands and respond. Each `screenshot` request

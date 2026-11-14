@@ -1,37 +1,37 @@
-# ta2 mutation results — 2026-11-13 07:30:18 +0200
-# kill command: bash -euo pipefail -c for t in test_harness_key_modifiers test_harness_key_modes; do nim c -r --hints:off --passC:-w --path:src --path:tests --path:/tmp/p66/m/nim-pty/src --path:/tmp/p66/m/nim-libvterm/src --path:/tmp/p66/m/TermAssertClient/src --mm:orc -d:release --threads:on --nimcache:${BUILD_DIR}/nc-$t -o:${BUILD_DIR}/$t tests/$t.nim; done
+# ta2 mutation results — 2026-11-14 10:37:18 +0200
+# kill command: bash -euo pipefail -c for t in test_harness_key_modifiers test_harness_key_modes; do nim c -r --hints:off --passC:-w --path:src --path:tests --path:../nim-pty/src --path:../nim-libvterm/src --path:../TermAssertClient/src --mm:orc -d:release --threads:on --nimcache:${BUILD_DIR}/nc-$t -o:${BUILD_DIR}/$t tests/$t.nim; done
 
-KILLED   K1       13.7s  Shift dropped from the modifier parameter
-           |     ../fx-ta/tests/test_harness_key_modifiers.nim(60, 37): Check failed: s.screenContents().contains(want)
+KILLED   K1       10.4s  Shift dropped from the modifier parameter
+           |     ./tests/test_harness_key_modifiers.nim(60, 37): Check failed: s.screenContents().contains(want)
            |   [FAILED] the bytes reach the child as encoded
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modifiers'
-KILLED   K2        7.0s  Shift dropped from a letter
-           |     ../fx-ta/tests/test_harness_key_modifiers.nim(60, 37): Check failed: s.screenContents().contains(want)
+KILLED   K2        5.6s  Shift dropped from a letter
+           |     ./tests/test_harness_key_modifiers.nim(60, 37): Check failed: s.screenContents().contains(want)
            |   [FAILED] the bytes reach the child as encoded
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modifiers'
-KILLED   K3        4.5s  a modifier dropped instead of refused
+KILLED   K3        6.1s  a modifier dropped instead of refused
            |   [FAILED] a combination no terminal encoding expresses is refused
            |   [OK] the bytes reach the child as encoded
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modifiers'
-KILLED   K4        4.3s  the modifier parameter dropped on tilde keys
+KILLED   K4        6.5s  the modifier parameter dropped on tilde keys
            |   [OK] a combination no terminal encoding expresses is refused
            |   [OK] the bytes reach the child as encoded
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modifiers'
-KILLED   K5       20.3s  the key reporting the child requested ignored
-           |     ../fx-ta/tests/test_harness_key_modes.nim(46, 35): Check failed: s.screenContents().contains(want)
+KILLED   K5       26.3s  the key reporting the child requested ignored
+           |     ./tests/test_harness_key_modes.nim(46, 35): Check failed: s.screenContents().contains(want)
            |   [OK] a request that arrives in two reads takes effect once complete
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modes'
-KILLED   K6       14.5s  Shift dropped from the extended encodings' modifier parameter
+KILLED   K6       15.3s  Shift dropped from the extended encodings' modifier parameter
            |   [OK] a child that never asks gets the legacy bytes
            |   [OK] a request that arrives in two reads takes effect once complete
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modes'
-KILLED   K7       12.4s  a Kitty pop ignored
+KILLED   K7       12.1s  a Kitty pop ignored
            |   [OK] a child that never asks gets the legacy bytes
            |   [OK] a request that arrives in two reads takes effect once complete
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modes'
-KILLED   K8       10.0s  a request split across two reads lost
-           |     ../fx-ta/tests/test_harness_key_modes.nim(46, 35): Check failed: s.screenContents().contains(want)
+KILLED   K8       12.5s  a request split across two reads lost
+           |     ./tests/test_harness_key_modes.nim(46, 35): Check failed: s.screenContents().contains(want)
            |   [FAILED] a request that arrives in two reads takes effect once complete
            | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modes'
 
-8/8 killed, 0 survived
+8/8 killed, 0 survived or timed out

@@ -1,0 +1,17 @@
+# ta3 mutation results — 2026-11-14 10:36:52 +0200
+# kill command: bash -euo pipefail -c for t in test_harness_answer_queries; do nim c -r --hints:off --passC:-w --path:src --path:tests --path:../nim-pty/src --path:../nim-libvterm/src --path:../TermAssertClient/src --mm:orc -d:release --threads:on --nimcache:${BUILD_DIR}/nc-$t -o:${BUILD_DIR}/$t tests/$t.nim; done
+
+KILLED   Q1       12.0s  the emulator's answers never written back
+           |   [FAILED] two queries are answered in the order asked
+           |   [OK] without answerQueries the terminal answers nothing
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_answer_queries'
+KILLED   Q2        5.4s  a session answers although it was not asked to
+           |     s.got() was 033 [ ? 1 ; 2 c
+           |   [FAILED] without answerQueries the terminal answers nothing
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_answer_queries'
+KILLED   Q3        4.1s  a long answer cut short (two answers in one read lose the second)
+           |   [FAILED] two queries are answered in the order asked
+           |   [OK] without answerQueries the terminal answers nothing
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_answer_queries'
+
+3/3 killed, 0 survived or timed out

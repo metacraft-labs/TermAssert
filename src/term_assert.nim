@@ -109,6 +109,11 @@ type
     keyModes: KeyModeTracker
       ## The key reporting the child requested (xterm `modifyOtherKeys`,
       ## the Kitty keyboard protocol), followed across every byte it writes.
+    peekFd: cint
+      ## A second descriptor on the child's terminal (the slave side), only
+      ## ever asked how much it holds unread (`pendingInput`); `peekOpen`
+      ## says whether it was opened.
+    peekOpen: bool
 
   TimeoutError* = object of CatchableError
   AssertionFailedError* = object of CatchableError
@@ -1170,6 +1175,35 @@ proc exitCode*(s: var TuiTestSession): Option[int] =
   discard pump(s, 50)
   s.pty.exitCode()
 
+when defined(posix):
+  from std/posix import nil
+  proc ptsnameC(fd: cint): cstring {.importc: "ptsname", header: "<stdlib.h>".}
+  var FIONREAD_C {.importc: "FIONREAD", header: "<sys/ioctl.h>".}: cuint
+
+proc pendingInput*(s: var TuiTestSession): int =
+  ## How many bytes written to the child it has not read yet: the input
+  ## still queued on its terminal. Zero once the child has read everything
+  ## sent to it. Measured on a descriptor of the child's own terminal opened
+  ## without becoming its controller and never read from (FIONREAD), since
+  ## the pty's master side does not report what the slave holds. Bytes just
+  ## written reach the child's terminal a moment later (the kernel moves
+  ## them through the pty's flip buffer), so a count read at once after a
+  ## `send` can still be 0. -1 when the platform cannot say.
+  when defined(posix):
+    if s.closed: return 0
+    if not s.peekOpen:
+      let name = ptsnameC(s.pty.master.fd)
+      if name == nil: return -1
+      let fd = posix.open(name, posix.O_RDONLY or posix.O_NOCTTY or posix.O_NONBLOCK or posix.O_CLOEXEC)
+      if fd < 0: return -1
+      s.peekFd = fd
+      s.peekOpen = true
+    var n: cint = 0
+    if posix.ioctl(s.peekFd, uint(FIONREAD_C), addr n) != 0: return -1
+    int(n)
+  else:
+    -1
+
 proc close*(s: var TuiTestSession) =
   ## Reap the child + close the pty + release the IPC socket. Idempotent.
   ##
@@ -1184,6 +1218,10 @@ proc close*(s: var TuiTestSession) =
     s.pty.terminate()
   s.pty.close()
   s.ipc.closeServer()
+  when defined(posix):
+    if s.peekOpen:
+      discard posix.close(s.peekFd)
+      s.peekOpen = false
   s.closed = true
 
 proc waitExit*(s: var TuiTestSession; timeout: Duration): Option[int] =

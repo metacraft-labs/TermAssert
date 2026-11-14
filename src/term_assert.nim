@@ -1172,7 +1172,16 @@ proc exitCode*(s: var TuiTestSession): Option[int] =
 
 proc close*(s: var TuiTestSession) =
   ## Reap the child + close the pty + release the IPC socket. Idempotent.
+  ##
+  ## BOUNDED. A child still running is ended first with SIGTERM, then SIGKILL
+  ## a quarter-second later (`terminate`), and only then is the pty closed.
+  ## Closing alone hangs up the child with SIGHUP and waits for it without a
+  ## limit, and a child that ignores SIGHUP (inherited from a `nohup` caller,
+  ## as a mutation grade's children are) was waited for forever: a `cat`
+  ## blocked reading its pty held a grade for two and a half hours.
   if s.closed: return
+  if s.pty.isAlive:
+    s.pty.terminate()
   s.pty.close()
   s.ipc.closeServer()
   s.closed = true

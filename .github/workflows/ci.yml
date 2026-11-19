@@ -19,10 +19,18 @@ on:
     branches: [main, dev, stable]
   pull_request:
 
+# Cancel superseded PR runs only: a new push to a PR makes its previous run
+# moot, and stale runs otherwise hold scarce self-hosted runners. Every other
+# event (mainline push, merge_group, tag, dispatch, schedule) gets a group
+# unique to its run_id, so it is never cancelled and never cancels anything.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     name: Lint
-    runs-on: eph-linux-x64
+    runs-on: [self-hosted, linux, x64]
     steps:
       # The manifest repo holding the workspace locks (metacraft-manifests) is
       # private, so `secrets.GITHUB_TOKEN` cannot read it. Mint an installation
@@ -92,7 +100,7 @@ jobs:
 
   charter-matrix:
     name: Charter (${{ matrix.mm }}/${{ matrix.mode }}/threads:${{ matrix.threads }})
-    runs-on: eph-linux-x64
+    runs-on: [self-hosted, linux, x64]
     strategy:
       fail-fast: false
       matrix:

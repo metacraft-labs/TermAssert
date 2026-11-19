@@ -1,0 +1,29 @@
+# ta1 mutation results — 2026-11-15 06:06:02 +0200
+# kill command: bash -euo pipefail -c for t in test_harness_mouse_drag test_harness_mouse_events; do nim c -r --hints:off --passC:-w --path:src --path:tests --path:../nim-pty/src --path:../nim-libvterm/src --path:../TermAssertClient/src --mm:orc -d:release --threads:on --nimcache:${BUILD_DIR}/nc-$t -o:${BUILD_DIR}/$t tests/$t.nim; done
+
+KILLED   M1       25.4s  motion reported without the +32 motion bit
+           |   [FAILED] any-motion tracking: a motion with no button held
+           |   [OK] a click is unchanged: press and release at one cell
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_mouse_drag'
+KILLED   M2       27.8s  the release terminated with M
+           |     want was ^[[<0;6;4M^[[<0;6;4m
+           |   [FAILED] a click is unchanged: press and release at one cell
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_mouse_drag'
+KILLED   M3       37.1s  column and row swapped
+           |     want was ^[[<0;6;4M^[[<0;6;4m
+           |   [FAILED] a click is unchanged: press and release at one cell
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_mouse_drag'
+KILLED   M4       37.9s  the Shift bit dropped
+           |   [OK] any-motion tracking: a motion with no button held
+           |   [OK] a click is unchanged: press and release at one cell
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_mouse_drag'
+KILLED   M5       27.6s  the tracking check removed
+           |   [OK] any-motion tracking: a motion with no button held
+           |   [OK] a click is unchanged: press and release at one cell
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_mouse_drag'
+KILLED   M6       26.3s  an intermediate cell skipped
+           |   [OK] any-motion tracking: a motion with no button held
+           |   [OK] a click is unchanged: press and release at one cell
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_mouse_drag'
+
+6/6 killed, 0 survived or timed out

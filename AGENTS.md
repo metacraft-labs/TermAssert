@@ -12,7 +12,28 @@ synchronized output, kitty keyboard, mouse 1006/1016).
 - Spawn a child process inside a pseudo-terminal.
 - Parse the child's output through a real libvterm instance into a
   `Screen` value.
-- Synthesize input (text, named keys, mouse SGR sequences).
+- Synthesize input (text, named keys, mouse SGR sequences): clicks and the wheel
+  (`sendMouseClick`, `sendMouseScroll`), and a press, motion and release as separate
+  reports (`sendMousePress`, `sendMouseMove`, `sendMouseRelease`) or as a drag
+  (`sendMouseDrag`). Motion is sent only when the child enabled it — DEC 1002 for
+  motion with a button held, 1003 for any motion; otherwise `MouseTrackingError` is
+  raised, because a real terminal would not report it. `mouseTracking()` says what
+  the child enabled.
+- Send named keys with modifiers (`sendKey("ctrl+alt+j")`, `sendKey("shift+f5")`)
+  encoded the way a terminal encodes them for THIS child. The harness follows the
+  key reporting the child requested in its output: xterm's `modifyOtherKeys` level 2
+  (`CSI > 4 ; 2 m`) turns a modified key into `CSI 27 ; m ; code ~`
+  (Ctrl+Alt+J is `\e[27;7;106~`), the Kitty keyboard protocol's disambiguate flag
+  (`CSI > 1 u`, with its push / pop / set stack) into `CSI code ; m u`
+  (`\e[106;7u`), and a child that asked for nothing — or took its request back —
+  gets xterm's legacy bytes. `keyMode()` says what the child requested,
+  `keyBytes(name, mode)` gives the bytes for any mode and `keyBytes(name)` the
+  legacy ones. A combination the active encoding cannot express (Ctrl+Shift+K in
+  legacy mode, a Kitty flag beyond disambiguate) raises `KeyEncodingError`; a
+  modifier is never dropped. Key names are case-insensitive, a letter after a
+  modifier included: `Alt+T` is Alt+t, as menus write it, and Shift is spelled
+  when it is meant (`Alt+Shift+T`). Only a capital letter on its own
+  (`sendKey("A")`) is the shifted character, the way it is typed.
 - Block on conditions (`waitForText`, `waitForRegionChange`,
   `waitForNotification`, ...).
 - Receive screenshot / exit / ping requests from the child via a Unix
@@ -20,6 +41,10 @@ synchronized output, kitty keyboard, mouse 1006/1016).
   is the child-side counterpart).
 - Write six-format goldens that share the layout used by isonim-tui's
   in-process `TerminalTestHarness` from M2.
+- Compare a screen's words AND every cell's colours and attributes against a
+  committed styled snapshot (`styledSnapshotDiffs`: `plaintext.txt` plus a
+  compact `styles.txt`), and draw a screen in its own colours as SVG
+  (`renderColourSvg`) for review or PNG conversion.
 
 ## Status
 
@@ -56,6 +81,7 @@ just bench           # spawn-1000-keys benchmark (target < 200 ms)
 src/
   term_assert.nim                  # public top-level - builder + session
   term_assert/ipc.nim              # Unix-socket IPC server
+  term_assert/key_modes.nim        # key reporting the child requested
   term_assert/snapshot.nim         # six-format golden writer
 tests/
   test_harness_*.nim               # real-stack integration tests
@@ -97,7 +123,6 @@ sess.close()
 
 ## Specs
 
-The authoritative spec for this library is the **M28** entry in
-`Front-Ends/IsoNim/isonim-tui.milestones.org` in the
-`codetracer-specs` repo. Repo-level conformance is governed by
-`metacraft-specs/policies/repo-requirements.md`.
+Design documents, plans and open issues for this repository are kept in the
+maintainers' project-management repository, which is not public. Contributors
+without access should open a GitHub issue here.

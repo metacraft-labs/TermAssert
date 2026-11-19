@@ -1,0 +1,37 @@
+# ta2 mutation results — 2026-11-15 06:09:04 +0200
+# kill command: bash -euo pipefail -c for t in test_harness_key_modifiers test_harness_key_modes; do nim c -r --hints:off --passC:-w --path:src --path:tests --path:../nim-pty/src --path:../nim-libvterm/src --path:../TermAssertClient/src --mm:orc -d:release --threads:on --nimcache:${BUILD_DIR}/nc-$t -o:${BUILD_DIR}/$t tests/$t.nim; done
+
+KILLED   K1       42.8s  Shift dropped from the modifier parameter
+           |     test_harness_key_modifiers.nim(60, 37): Check failed: s.screenContents().contains(want)
+           |   [FAILED] the bytes reach the child as encoded
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modifiers'
+KILLED   K2       20.7s  Shift dropped from a letter
+           |     test_harness_key_modifiers.nim(60, 37): Check failed: s.screenContents().contains(want)
+           |   [FAILED] the bytes reach the child as encoded
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modifiers'
+KILLED   K3       18.0s  a modifier dropped instead of refused
+           |   [FAILED] a combination no terminal encoding expresses is refused
+           |   [OK] the bytes reach the child as encoded
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modifiers'
+KILLED   K4       16.6s  the modifier parameter dropped on tilde keys
+           |   [OK] a combination no terminal encoding expresses is refused
+           |   [OK] the bytes reach the child as encoded
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modifiers'
+KILLED   K5       69.7s  the key reporting the child requested ignored
+           |     test_harness_key_modes.nim(46, 35): Check failed: s.screenContents().contains(want)
+           |   [FAILED] a request that arrives in two reads takes effect once complete
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modes'
+KILLED   K6       47.3s  Shift dropped from the extended encodings' modifier parameter
+           |   [OK] a child that never asks gets the legacy bytes
+           |   [OK] a request that arrives in two reads takes effect once complete
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modes'
+KILLED   K7       40.5s  a Kitty pop ignored
+           |   [OK] a child that never asks gets the legacy bytes
+           |   [OK] a request that arrives in two reads takes effect once complete
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modes'
+KILLED   K8       45.6s  a request split across two reads lost
+           |     test_harness_key_modes.nim(46, 35): Check failed: s.screenContents().contains(want)
+           |   [FAILED] a request that arrives in two reads takes effect once complete
+           | Error: execution of an external program failed: '$BUILD_DIR/test_harness_key_modes'
+
+8/8 killed, 0 survived or timed out

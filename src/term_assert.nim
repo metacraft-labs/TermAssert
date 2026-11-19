@@ -38,16 +38,18 @@
 ##   +-- snapshots: Table[string, ScreenSnapshot]   (IPC-recorded screens)
 ## ```
 
-import std/[options, os, strutils, monotimes, times, tables, json]
+import std/[options, os, strutils, monotimes, times, tables, json, math]
 
 import nim_pty
 import nim_libvterm
 
 import term_assert/ipc
+import term_assert/key_modes
 import term_assert/snapshot
 
 export options, times, tables
 export ipc, snapshot
+export key_modes.KeyMode
 export nim_libvterm except Screen
 # (Screen is re-exported through `session.screen()` accessor; not a
 # copyable value, so callers always go through the accessor.)
@@ -58,13 +60,15 @@ export nim_libvterm except Screen
 
 type
   MouseButton* = enum
-    mbLeft, mbMiddle, mbRight, mbWheelUp, mbWheelDown
+    mbLeft, mbMiddle, mbRight, mbWheelUp, mbWheelDown, mbWheelLeft, mbWheelRight
 
   KeyModifier* = enum
     kmShift, kmAlt, kmCtrl
 
   ScrollDir* = enum
-    sdUp, sdDown
+    sdUp, sdDown, sdLeft, sdRight
+      ## `sdLeft` / `sdRight`: a horizontal wheel or a tilted one (SGR buttons
+      ## 66 and 67, as xterm, kitty and WezTerm report them).
 
   TuiTestBuilder* = object
     ## Fluent builder for spawning a harness session.
@@ -76,6 +80,8 @@ type
     envBlocked: seq[string]
     cwd: string
     inheritEnv: bool
+    recordTranscript: bool
+    answerQueries: bool
 
   ScreenSnapshot* = object
     label*: string
@@ -94,6 +100,20 @@ type
     snapshotsTable: Table[string, ScreenSnapshot]
     rxBuf: seq[byte]
     closed: bool
+    transcriptOn: bool
+    transcriptBuf: string
+    transcriptDropped: int
+    answering: bool
+      ## Whether the emulator's answers to the child's queries are written
+      ## back to it (`answerQueries`).
+    keyModes: KeyModeTracker
+      ## The key reporting the child requested (xterm `modifyOtherKeys`,
+      ## the Kitty keyboard protocol), followed across every byte it writes.
+    peekFd: cint
+      ## A second descriptor on the child's terminal (the slave side), only
+      ## ever asked how much it holds unread (`pendingInput`); `peekOpen`
+      ## says whether it was opened.
+    peekOpen: bool
 
   TimeoutError* = object of CatchableError
   AssertionFailedError* = object of CatchableError
@@ -114,6 +134,7 @@ proc newTuiTest*(cmd: string; args: openArray[string]): TuiTestBuilder =
   result.envBlocked = @[]
   result.cwd = ""
   result.inheritEnv = true
+  result.recordTranscript = false
 
 proc width*(b: TuiTestBuilder; cols: int): TuiTestBuilder =
   result = b
@@ -135,6 +156,52 @@ proc workDir*(b: TuiTestBuilder; dir: string): TuiTestBuilder =
   result = b
   result.cwd = dir
 
+const TranscriptCapBytes* = 8 * 1024 * 1024
+  ## How much of a session's raw byte stream `transcript` keeps.
+  ##
+  ## A cap rather than an unbounded buffer, because a soak test that ran for
+  ## an hour would otherwise hold every byte its child ever wrote. Eight
+  ## megabytes is roughly nine hundred full 200x60 frames — far more than any
+  ## assertion about a startup or a shutdown needs, and `transcriptDropped`
+  ## says when it was not enough rather than letting a truncated buffer read
+  ## as a complete one.
+
+proc transcript*(b: TuiTestBuilder; on = true): TuiTestBuilder =
+  ## Keep the child's RAW BYTE STREAM, in addition to parsing it.
+  ##
+  ## OFF BY DEFAULT, because almost every assertion in this harness is about
+  ## the parsed screen and a second copy of the bytes would be pure cost. It
+  ## exists for the claims a parsed screen cannot carry — the ones about
+  ## SEQUENCES rather than about cells.
+  ##
+  ## The motivating case is the alternate screen. `CSI ? 1049 h` and
+  ## `CSI ? 1049 l` are a PAIR, and a terminal's live state after the child has
+  ## exited says nothing about whether both were sent — the same "live flag,
+  ## not a latch" property `nim-libvterm`'s `synchronizedOutput` has. Counting
+  ## them in the stream is the only way to observe the pair, and
+  ## `codetracer`'s `tests/real_terminal/test_real_pty_lifecycle.nim` is what
+  ## asked for it.
+  result = b
+  result.recordTranscript = on
+
+proc answerQueries*(b: TuiTestBuilder; on = true): TuiTestBuilder =
+  ## Answer the child's queries as a real terminal does: what the emulator
+  ## replies to Primary and Secondary Device Attributes (`CSI c`, `CSI > c`),
+  ## the cursor position report (`CSI 6 n`, and DECXCPR `CSI ? 6 n`), DSR 5,
+  ## DECRQM, DECRQSS and XTVERSION is written back to the child's input as
+  ## soon as the query has been read, in the order asked. The answers are
+  ## libvterm's (`nim_libvterm.takeReplies`), so XTVERSION names libvterm and
+  ## the background-colour query (`OSC 11`), which libvterm does not answer,
+  ## stays unanswered.
+  ##
+  ## OFF BY DEFAULT: until this existed the harness's terminal answered
+  ## nothing, and suites that decide what a terminal "that never answers" is
+  ## given were written against that. An application that waits for its
+  ## queries to come back (a reply window, a DA1 fence) runs here exactly as
+  ## it would on such a terminal unless this is on.
+  result = b
+  result.answerQueries = on
+
 # ---------------------------------------------------------------------------
 # Spawn
 # ---------------------------------------------------------------------------
@@ -143,7 +210,36 @@ const tmuxBlockedDefault = ["TMUX", "TMUX_PANE"]
 
 proc effectiveEnv(b: TuiTestBuilder; harnessUri: string): seq[(string, string)] =
   ## Build the effective environment: inherit (if enabled) minus blocked
-  ## minus tmux defaults plus overrides plus TERM_ASSERT_URI.
+  ## minus tmux defaults, then apply the overrides, then `TERM_ASSERT_URI`.
+  ##
+  ## ## THE BLOCKLIST FILTERS THE INHERITED ENVIRONMENT ONLY
+  ##
+  ## `envRemove` says "do not let the ambient value through"; `envSet` says
+  ## "the child sees exactly this". An explicit override is the more specific
+  ## instruction of the two and it WINS, whatever order the builder calls
+  ## arrived in.
+  ##
+  ## This used to apply `blocked` to `b.envOverrides` as well, which made
+  ## `.envRemove(X).envSet(X, v)` leave `X` ABSENT — the caller's own value
+  ## silently discarded by the caller's own earlier line. It is a natural thing
+  ## to write: a suite that wants a known environment removes the five
+  ## variables an inherited terminal might set and then sets the ones it needs,
+  ## and two of those sets can easily name a variable the first list also
+  ## covered.
+  ##
+  ## It cost a real measurement. `codetracer`'s
+  ## `tests/real_terminal/test_real_pty_lifecycle.nim` bounds a DAP handshake
+  ## with a budget passed through an environment variable, and asserts that the
+  ## exit time TRACKS the budget. With this defect the variable never reached
+  ## the child, which used its own 30-second default both times: the case
+  ## measured **30,013 ms and 30,016 ms for budgets 4,500 ms apart** and read
+  ## as "the implementation ends the session for some other reason". The
+  ## assertion was right and the harness was wrong, which is the worst way
+  ## round for a harness to be.
+  ##
+  ## The tmux defaults are on the same footing: they exist so an inherited
+  ## `$TMUX` cannot make a child think it is inside a multiplexer, and a caller
+  ## that explicitly sets `TMUX` is asking for the opposite on purpose.
   let blocked = block:
     var s = newSeq[string]()
     for v in tmuxBlockedDefault: s.add v
@@ -156,7 +252,6 @@ proc effectiveEnv(b: TuiTestBuilder; harnessUri: string): seq[(string, string)] 
       if b.envOverrides.hasKey(k): continue
       result.add((k, v))
   for k, v in b.envOverrides:
-    if k in blocked: continue
     result.add((k, v))
   # Always inject the IPC URI so children can connect.
   result.add(("TERM_ASSERT_URI", harnessUri))
@@ -171,6 +266,11 @@ proc spawn*(b: TuiTestBuilder): TuiTestSession =
   sess.snapshotsTable = initTable[string, ScreenSnapshot]()
   sess.rxBuf = @[]
   sess.closed = false
+  sess.transcriptOn = b.recordTranscript
+  sess.answering = b.answerQueries
+  sess.transcriptBuf = ""
+  sess.transcriptDropped = 0
+  sess.keyModes = initKeyModeTracker()
   sess.ipc = startIpcServer()
   let env = effectiveEnv(b, sess.ipc.socketPath)
   let opts = SpawnOptions(cols: b.cols, rows: b.rows, cwd: b.cwd)
@@ -193,6 +293,35 @@ proc spawn*(b: TuiTestBuilder): TuiTestSession =
 # ---------------------------------------------------------------------------
 # I/O pump - read bytes from the pty and feed libvterm
 # ---------------------------------------------------------------------------
+
+proc recordBytes(s: var TuiTestSession; chunk: openArray[byte]) =
+  ## Append one pty read to the transcript, when one is being kept.
+  ##
+  ## EVERY BYTE THE HARNESS READS PASSES THROUGH HERE, from `ingest`, which
+  ## also feeds libvterm, so the transcript and the parsed screen can never be
+  ## built from different data.
+  if not s.transcriptOn:
+    return
+  if s.transcriptBuf.len + chunk.len > TranscriptCapBytes:
+    s.transcriptDropped += chunk.len
+    return
+  let start = s.transcriptBuf.len
+  s.transcriptBuf.setLen(start + chunk.len)
+  for i, b in chunk:
+    s.transcriptBuf[start + i] = char(b)
+
+proc ingest(s: var TuiTestSession; chunk: openArray[byte]) =
+  ## One pty read: into the transcript, the key-mode tracker and libvterm,
+  ## and the emulator's answers back to the child when it answers queries.
+  ## The single path every byte the harness reads takes.
+  s.recordBytes(chunk)
+  s.keyModes.feed(chunk)
+  s.screen.feed(chunk)
+  # The emulator queues its answers while it parses the queries; they are
+  # always taken, so a session that does not answer never fills the queue.
+  let replies = s.screen.takeReplies()
+  if s.answering and replies.len > 0:
+    s.pty.write(toOpenArrayByte(replies, 0, replies.high))
 
 proc handleIpcCommands(s: var TuiTestSession) =
   ## Drain pending IPC commands and respond. Each `screenshot` request
@@ -229,7 +358,7 @@ proc pump(s: var TuiTestSession; budgetMs: int): int =
     if rem.inMilliseconds <= 0:
       let chunk = readBytes(s.pty, 4096, initDuration(milliseconds = 0))
       if chunk.len == 0: break
-      s.screen.feed(chunk)
+      s.ingest(chunk)
       result += chunk.len
       handleIpcCommands(s)
       continue
@@ -239,7 +368,7 @@ proc pump(s: var TuiTestSession; budgetMs: int): int =
       handleIpcCommands(s)
       if not isAlive(s.pty): break
       continue
-    s.screen.feed(chunk)
+    s.ingest(chunk)
     result += chunk.len
     handleIpcCommands(s)
 
@@ -252,7 +381,7 @@ proc drainOutput*(s: var TuiTestSession; idleMs: int = 30): int =
     let chunk = readBytes(s.pty, 4096, initDuration(milliseconds = idleMs))
     handleIpcCommands(s)
     if chunk.len > 0:
-      s.screen.feed(chunk)
+      s.ingest(chunk)
       result += chunk.len
       lastActivity = getMonoTime()
     else:
@@ -261,6 +390,21 @@ proc drainOutput*(s: var TuiTestSession; idleMs: int = 30): int =
       if elapsed.inMilliseconds >= idleMs.int64:
         break
       if not isAlive(s.pty): break
+
+proc transcriptBytes*(s: var TuiTestSession): string =
+  ## Every byte this session's child has written so far, when the builder
+  ## asked for a transcript; "" otherwise.
+  ##
+  ## Runs a non-blocking pump first, for the same reason `screenContents` does:
+  ## a caller that has just sent a key wants the answer that includes it.
+  discard pump(s, 0)
+  s.transcriptBuf
+
+proc transcriptDroppedBytes*(s: var TuiTestSession): int =
+  ## How many bytes the cap discarded. NON-ZERO MEANS THE TRANSCRIPT IS
+  ## INCOMPLETE, and an assertion about a sequence not appearing in it is not
+  ## sound — check this before trusting a negative.
+  s.transcriptDropped
 
 # ---------------------------------------------------------------------------
 # Screen / state queries
@@ -388,86 +532,402 @@ proc sendControl*(s: var TuiTestSession; c: char) =
   var arr = [b]
   s.pty.write(arr)
 
-proc sendKey*(s: var TuiTestSession; name: string) =
-  ## Common named keys (xterm sequences). Modifiers in the form
-  ## `ctrl+a`, `alt+f1` are handled by stripping the prefix.
+type
+  KeyEncodingError* = object of ValueError
+    ## Raised for a key with modifiers no terminal encoding expresses: the key
+    ## is never sent without them.
+
+proc splitModifiers(name: string): tuple[key: string; ctrl, alt, shift: bool] =
+  ## `name` lower-cased and stripped of its `ctrl+`, `alt+`, `shift+` prefixes.
   var key = name.toLowerAscii()
-  var ctrl = false
-  var alt = false
+  var ctrl, alt, shift = false
   while true:
     if key.startsWith("ctrl+"):
       ctrl = true; key = key[5 .. ^1]
     elif key.startsWith("alt+"):
       alt = true; key = key[4 .. ^1]
     elif key.startsWith("shift+"):
-      key = key[6 .. ^1]
+      shift = true; key = key[6 .. ^1]
     else: break
-  var seq2 = ""
+  (key, ctrl, alt, shift)
+
+proc typedCapital(name: string): bool =
+  ## `name` is a capital letter on its own: the character typed, Shift+letter.
+  ## After a modifier a capital names the letter's key (`alt+T` is Alt+t, as
+  ## menus and keymaps write it); a chord with Shift spells it (`alt+shift+t`).
+  name.len == 1 and name[0] in {'A'..'Z'}
+
+proc keyBytes*(name: string): string =
+  ## The bytes a terminal (xterm) sends in its DEFAULT, legacy encoding for a
+  ## key name with optional `ctrl+`, `alt+`, `shift+` prefixes. Modifiers on
+  ## cursor, editing and function keys use xterm's parameter (1 + shift 1,
+  ## alt 2, ctrl 4); Shift on a letter is its capital; Ctrl on a letter is its
+  ## control character; Alt prefixes ESC. A combination with no encoding
+  ## raises `KeyEncodingError` rather than dropping a modifier.
+  ##
+  ## Names are case-insensitive, and so is a letter after a modifier: `Alt+T`
+  ## is Alt+t, and Alt+Shift+T is spelled `alt+shift+t`. Only a capital letter
+  ## on its own (`"A"`) is the shifted character, the way it is typed.
+  ##
+  ## This is what a terminal sends to a child that asked for nothing. For the
+  ## encoding a child that requested extended key reporting receives, see
+  ## `keyBytes(name, mode)`; `sendKey` uses the one the child asked for.
+  let (key, ctrl, alt, shift) = splitModifiers(name)
+  let m = 1 + (if shift: 1 else: 0) + (if alt: 2 else: 0) + (if ctrl: 4 else: 0)
+  let modified = m > 1
+  proc csi(final: char): string =
+    (if modified: "\x1b[1;" & $m & $final else: "\x1b[" & $final)
+  proc tilde(n: int): string =
+    (if modified: "\x1b[" & $n & ";" & $m & "~" else: "\x1b[" & $n & "~")
+  proc ss3(final: char): string =
+    (if modified: "\x1b[1;" & $m & $final else: "\x1bO" & $final)
+  proc plain(bytes: string): string =
+    # keys whose only modifier encoding is the Alt (ESC) prefix
+    if ctrl or shift:
+      raise newException(KeyEncodingError, "no terminal encoding for " & name)
+    (if alt: "\x1b" & bytes else: bytes)
   case key
-  of "up": seq2 = "\x1b[A"
-  of "down": seq2 = "\x1b[B"
-  of "right": seq2 = "\x1b[C"
-  of "left": seq2 = "\x1b[D"
-  of "home": seq2 = "\x1b[H"
-  of "end": seq2 = "\x1b[F"
-  of "pageup", "pgup": seq2 = "\x1b[5~"
-  of "pagedown", "pgdn": seq2 = "\x1b[6~"
-  of "insert": seq2 = "\x1b[2~"
-  of "delete", "del": seq2 = "\x1b[3~"
-  of "tab": seq2 = "\t"
-  of "backtab": seq2 = "\x1b[Z"
-  of "enter", "return": seq2 = "\r"
-  of "escape", "esc": seq2 = "\x1b"
-  of "backspace": seq2 = "\x7f"
-  of "space": seq2 = " "
-  of "f1": seq2 = "\x1bOP"
-  of "f2": seq2 = "\x1bOQ"
-  of "f3": seq2 = "\x1bOR"
-  of "f4": seq2 = "\x1bOS"
-  of "f5": seq2 = "\x1b[15~"
-  of "f6": seq2 = "\x1b[17~"
-  of "f7": seq2 = "\x1b[18~"
-  of "f8": seq2 = "\x1b[19~"
-  of "f9": seq2 = "\x1b[20~"
-  of "f10": seq2 = "\x1b[21~"
-  of "f11": seq2 = "\x1b[23~"
-  of "f12": seq2 = "\x1b[24~"
+  of "up": csi('A')
+  of "down": csi('B')
+  of "right": csi('C')
+  of "left": csi('D')
+  of "home": csi('H')
+  of "end": csi('F')
+  of "pageup", "pgup": tilde(5)
+  of "pagedown", "pgdn": tilde(6)
+  of "insert": tilde(2)
+  of "delete", "del": tilde(3)
+  of "f1": ss3('P')
+  of "f2": ss3('Q')
+  of "f3": ss3('R')
+  of "f4": ss3('S')
+  of "f5": tilde(15)
+  of "f6": tilde(17)
+  of "f7": tilde(18)
+  of "f8": tilde(19)
+  of "f9": tilde(20)
+  of "f10": tilde(21)
+  of "f11": tilde(23)
+  of "f12": tilde(24)
+  of "tab":
+    if shift and not ctrl and not alt: "\x1b[Z"
+    else: plain("\t")
+  of "backtab": (if modified: raise newException(KeyEncodingError, "no terminal encoding for " & name) else: "\x1b[Z")
+  of "enter", "return": plain("\r")
+  of "escape", "esc": plain("\x1b")
+  of "backspace": plain("\x7f")
+  of "space":
+    if ctrl and not shift: (if alt: "\x1b\x00" else: "\x00")
+    else: plain(" ")
   else:
-    if key.len == 1:
-      var b = byte(ord(key[0]))
-      if ctrl:
-        b = b and 0x1F.byte
-      var pre = ""
-      if alt: pre.add '\x1b'
-      seq2 = pre & $char(b)
-    else:
+    if key.len != 1:
       raise newException(ValueError, "unknown key: " & name)
-  if seq2.len > 0:
-    s.send(seq2)
+    var c = key[0]
+    if typedCapital(name): c = name[0]
+    if shift:
+      if c in {'a'..'z'}: c = c.toUpperAscii
+      elif c notin {'A'..'Z'}:
+        raise newException(KeyEncodingError, "no terminal encoding for " & name &
+          " (send the shifted character itself)")
+    var b = byte(ord(c))
+    if ctrl:
+      if c in {'a'..'z', 'A'..'Z'} and not shift: b = b and 0x1F.byte
+      elif c in {'A'..'Z'} and shift:
+        raise newException(KeyEncodingError, "no terminal encoding for " & name)
+      elif c in {'@', '[', '\\', ']', '^', '_'}: b = b and 0x1F.byte
+      else: raise newException(KeyEncodingError, "no terminal encoding for " & name)
+    (if alt: "\x1b" else: "") & $char(b)
+
+type
+  KeyEncoding* = enum
+    ## The encoding a terminal uses for modified keys.
+    keLegacy           ## xterm's default (`keyBytes(name)`)
+    keModifyOtherKeys  ## xterm `modifyOtherKeys` level 2: `CSI 27 ; m ; code ~`
+    keKitty            ## Kitty keyboard protocol, disambiguate flag: `CSI code ; m u`
+
+proc encoding*(mode: KeyMode): KeyEncoding =
+  ## Which encoding a terminal uses in `mode`. Kitty flags take precedence:
+  ## a terminal speaking the Kitty protocol is not also applying xterm's
+  ## resource. `modifyOtherKeys` level 1 is reported as `keLegacy`: at that
+  ## level xterm keeps the legacy bytes for every key the legacy encoding
+  ## expresses, and the few keys it changes are not modelled (they still
+  ## raise `KeyEncodingError`).
+  if mode.kittyFlags != 0: keKitty
+  elif mode.modifyOtherKeys == 2: keModifyOtherKeys
+  else: keLegacy
+
+proc modifierParam(ctrl, alt, shift: bool): int =
+  ## xterm's and Kitty's modifier parameter: 1 + shift 1 + alt 2 + ctrl 4.
+  1 + (if shift: 1 else: 0) + (if alt: 2 else: 0) + (if ctrl: 4 else: 0)
+
+proc textKey(key, name: string): tuple[code: int; named, letter, upper: bool] =
+  ## The code of a key the extended encodings report by its character —
+  ## everything but the cursor, editing and function keys — or code -1.
+  ## `upper` is a capital letter on its own, which is Shift+letter.
+  case key
+  of "enter", "return": (13, true, false, false)
+  of "tab": (9, true, false, false)
+  of "escape", "esc": (27, true, false, false)
+  of "backspace": (127, true, false, false)
+  of "space": (32, true, false, false)
+  else:
+    if key.len != 1: return (-1, false, false, false)
+    let letter = key[0] in {'a'..'z'}
+    (ord(key[0]), false, letter, typedCapital(name))
+
+proc noEncoding(name, why: string): ref KeyEncodingError =
+  newException(KeyEncodingError, "no terminal encoding for " & name & why)
+
+proc otherKeysBytes(name: string): string =
+  ## xterm with `modifyOtherKeys` level 2.
+  let (key, ctrl, alt, shift0) = splitModifiers(name)
+  let t = textKey(key, name)
+  if t.code < 0: return keyBytes(name)
+  let shift = shift0 or t.upper
+  if not (ctrl or alt or shift): return keyBytes(name)
+  if key == "tab" and shift and not ctrl and not alt: return "\x1b[Z"
+  if key == "backspace" and ctrl:
+    raise noEncoding(name, " (xterm turns Ctrl+Backspace into the other erase character)")
+  if shift and not t.named and not t.letter:
+    raise noEncoding(name, " (send the shifted character itself)")
+  let code = (if t.letter: ord(if shift: key[0].toUpperAscii else: key[0]) else: t.code)
+  "\x1b[27;" & $modifierParam(ctrl, alt, shift) & ";" & $code & "~"
+
+proc kittyBytes(name: string): string =
+  ## A Kitty-protocol terminal with the disambiguate flag.
+  let (key, ctrl, alt, shift0) = splitModifiers(name)
+  if key == "backtab":
+    if ctrl or alt or shift0: raise noEncoding(name, "")
+    return "\x1b[9;2u"
+  let t = textKey(key, name)
+  if t.code < 0: return keyBytes(name)
+  let shift = shift0 or t.upper
+  if not (ctrl or alt or shift):
+    return (if t.code == 27: "\x1b[27u" else: keyBytes(name))
+  if shift and not ctrl and not alt:
+    if t.letter: return $key[0].toUpperAscii
+    if key == "space": return " "
+  if shift and not t.named and not t.letter:
+    raise noEncoding(name, " (send the shifted character itself)")
+  let m = modifierParam(ctrl, alt, shift)
+  "\x1b[" & $t.code & (if m > 1: ";" & $m else: "") & "u"
+
+proc keyBytes*(name: string; mode: KeyMode): string =
+  ## The bytes a terminal sends for `name` (as `keyBytes(name)` spells it)
+  ## when the application has requested the key reporting in `mode`.
+  ##
+  ## Cursor, editing and function keys are unchanged by both requests; they
+  ## keep xterm's `CSI 1 ; m A` / `CSI n ; m ~` forms. The keys that change
+  ## are the ones a terminal reports by their character: letters, digits,
+  ## punctuation, Space, Enter, Tab, Escape and Backspace.
+  ##
+  ## xterm, `modifyOtherKeys` level 2 (`CSI > 4 ; 2 m`): a key with any
+  ## modifier is `CSI 27 ; m ; code ~`, m = 1 + shift 1 + alt 2 + ctrl 4, code
+  ## the character the key produces — so Shift is part of the code as well as
+  ## of m (Ctrl+Shift+K is code 75, `K`). Measured against xterm 410:
+  ##
+  ## ================  ==================
+  ## ctrl+alt+j        `CSI 27;7;106~`
+  ## ctrl+shift+k      `CSI 27;6;75~`
+  ## ctrl+a            `CSI 27;5;97~`
+  ## alt+x             `CSI 27;3;120~`
+  ## shift+a, "A"      `CSI 27;2;65~`
+  ## ctrl+1            `CSI 27;5;49~`
+  ## ctrl+enter        `CSI 27;5;13~`
+  ## ctrl+tab          `CSI 27;5;9~`
+  ## shift+tab         `CSI Z` (unchanged)
+  ## shift+space       `CSI 27;2;32~`
+  ## alt+escape        `CSI 27;3;27~`
+  ## unmodified keys   unchanged
+  ## ================  ==================
+  ##
+  ## Alt+Backspace is `CSI 27;3;127~`: the code is the byte Backspace sends,
+  ## and this harness's Backspace is DEL. Ctrl+Backspace is refused, because
+  ## xterm turns it into the other erase character rather than reporting it.
+  ##
+  ## Kitty keyboard protocol with the disambiguate flag (`CSI > 1 u`): a key
+  ## with Ctrl or Alt is `CSI code ; m u`, code the UNSHIFTED key, Shift only
+  ## in m; Escape is always `CSI 27 u`; Enter, Tab and Backspace keep their
+  ## legacy byte unmodified and become `CSI 13/9/127 ; m u` with any modifier;
+  ## Shift alone on a letter or Space is still text. Measured against kitty
+  ## 0.45's encoder:
+  ##
+  ## ================  ==================
+  ## ctrl+alt+j        `CSI 106;7u`
+  ## ctrl+shift+k      `CSI 107;6u`
+  ## ctrl+a            `CSI 97;5u`
+  ## alt+shift+a       `CSI 97;4u`
+  ## shift+a, "A"      `A`
+  ## escape            `CSI 27u`
+  ## shift+enter       `CSI 13;2u`
+  ## shift+tab         `CSI 9;2u`
+  ## ctrl+space        `CSI 32;5u`
+  ## unmodified keys   unchanged (but Escape)
+  ## ================  ==================
+  ##
+  ## Kitty flags 2 (event types) and 16 (associated text) change no bytes for
+  ## a key press and are accepted alongside 1. Any other Kitty flag set —
+  ## report alternate keys (4), report all keys (8), or flags without
+  ## disambiguate — raises `KeyEncodingError`: those encodings are not
+  ## modelled, and guessing would send bytes no terminal sends.
+  ##
+  ## In every mode Shift on a digit or punctuation raises `KeyEncodingError`
+  ## (the shifted character depends on the keyboard layout: send it as text),
+  ## and so does any combination the mode cannot express. A modifier is never
+  ## dropped.
+  case mode.encoding
+  of keLegacy: keyBytes(name)
+  of keModifyOtherKeys: otherKeysBytes(name)
+  of keKitty:
+    const modelled = 1 or 2 or 16
+    if (mode.kittyFlags and 1) == 0 or (mode.kittyFlags and not modelled) != 0:
+      raise newException(KeyEncodingError, "the child set Kitty keyboard flags " &
+        $mode.kittyFlags & ", whose encoding TermAssert does not model; " & name &
+        " was not sent")
+    kittyBytes(name)
+
+proc keyMode*(s: var TuiTestSession): KeyMode =
+  ## The key reporting the child has requested so far — xterm
+  ## `modifyOtherKeys` level and the Kitty flags in force on its active
+  ## screen — read from every byte it has written (a request split across
+  ## two reads counts once it is complete).
+  discard pump(s, 0)
+  s.keyModes.keyMode()
+
+proc sendKey*(s: var TuiTestSession; name: string) =
+  ## Send a named key ("up", "f5", "enter", a single character) with optional
+  ## `ctrl+`, `alt+` and `shift+` prefixes (case-insensitive: `Alt+T` is
+  ## Alt+t; Shift is always spelled, `Alt+Shift+T`), encoded as a terminal
+  ## does in the key reporting mode the child has requested (see
+  ## `keyBytes(name, mode)`):
+  ## legacy xterm bytes when it asked for nothing, xterm's `modifyOtherKeys`
+  ## form after `CSI > 4 ; 2 m`, the Kitty protocol's after `CSI > 1 u`.
+  ## Raises `KeyEncodingError` for a combination that mode cannot express;
+  ## a modifier is never dropped.
+  s.send(keyBytes(name, s.keyMode()))
+
+type
+  MouseTrackingError* = object of CatchableError
+    ## Raised when a pointer report is asked for that the child did not
+    ## enable: a real terminal would not send it, so sending it would test a
+    ## terminal that does not exist.
+
+proc mouseTracking*(s: var TuiTestSession): MouseTracking =
+  ## Which pointer events the child enabled (DEC 1000 / 1002 / 1003).
+  discard pump(s, 0)
+  s.screen.mouseTracking()
+
+proc buttonCode(button: MouseButton): int =
+  case button
+  of mbLeft: 0
+  of mbMiddle: 1
+  of mbRight: 2
+  of mbWheelUp: 64
+  of mbWheelDown: 65
+  of mbWheelLeft: 66
+  of mbWheelRight: 67
+
+proc modifierBits(modifiers: set[KeyModifier]): int =
+  (if kmShift in modifiers: 4 else: 0) or (if kmAlt in modifiers: 8 else: 0) or
+    (if kmCtrl in modifiers: 16 else: 0)
+
+proc sgrReport(code, row, col: int; final: char): string =
+  ## One SGR 1006 report at 0-based (row, col); the wire format is 1-based
+  ## column first. Every pointer procedure goes through this one encoder.
+  "\x1b[<" & $code & ";" & $(col + 1) & ";" & $(row + 1) & $final
+
+proc sendMousePress*(s: var TuiTestSession; row, col: int;
+                     button: MouseButton = mbLeft;
+                     modifiers: set[KeyModifier] = {}) =
+  ## SGR 1006 press at 0-based (row, col).
+  s.send(sgrReport(buttonCode(button) or modifierBits(modifiers), row, col, 'M'))
+
+proc sendMouseRelease*(s: var TuiTestSession; row, col: int;
+                       button: MouseButton = mbLeft;
+                       modifiers: set[KeyModifier] = {}) =
+  ## SGR 1006 release at 0-based (row, col).
+  s.send(sgrReport(buttonCode(button) or modifierBits(modifiers), row, col, 'm'))
+
+proc requireTracking(s: var TuiTestSession; needed: MouseTracking; what: string) =
+  let have = s.mouseTracking()
+  if ord(have) < ord(needed):
+    raise newException(MouseTrackingError, what & " needs mouse tracking " & $needed &
+      " (DEC " & (if needed == mtDrag: "1002" else: "1003") & "), but the child enabled " &
+      $have & "; a real terminal would send no motion report")
+
+proc sendMouseMove*(s: var TuiTestSession; row, col: int;
+                    held: set[MouseButton] = {};
+                    modifiers: set[KeyModifier] = {}) =
+  ## SGR 1006 motion report at 0-based (row, col): the code of the held
+  ## button (or 3 for none) plus 32. Motion with a button held needs the
+  ## child to have enabled 1002 or 1003; motion with none needs 1003.
+  ## Otherwise raises `MouseTrackingError` and sends nothing.
+  var base = 3
+  for b in [mbLeft, mbMiddle, mbRight]:
+    if b in held:
+      base = buttonCode(b)
+      break
+  s.requireTracking((if base == 3: mtMove else: mtDrag), "a pointer motion")
+  s.send(sgrReport((base + 32) or modifierBits(modifiers), row, col, 'M'))
+
+proc sendMouseDrag*(s: var TuiTestSession; fromRow, fromCol, toRow, toCol: int;
+                    button: MouseButton = mbLeft;
+                    modifiers: set[KeyModifier] = {};
+                    steps = 0) =
+  ## A drag: press at (fromRow, fromCol), motion reports with the button held,
+  ## release at (toRow, toCol). With `steps = 0` there is one motion report per
+  ## cell crossed along the straight line, ending at the destination; with
+  ## `steps = n`, n reports evenly spaced. Needs the child to have enabled
+  ## 1002 or 1003 — checked before anything is sent.
+  s.requireTracking(mtDrag, "a drag")
+  let dr = toRow - fromRow
+  let dc = toCol - fromCol
+  let n = (if steps > 0: steps else: max(abs(dr), abs(dc)))
+  let code = (buttonCode(button) + 32) or modifierBits(modifiers)
+  s.sendMousePress(fromRow, fromCol, button, modifiers)
+  var last = (fromRow, fromCol)
+  for k in 1 .. n:
+    let r = fromRow + int(round(float(dr * k) / float(n)))
+    let c = fromCol + int(round(float(dc * k) / float(n)))
+    if (r, c) == last and steps == 0: continue
+    s.send(sgrReport(code, r, c, 'M'))
+    last = (r, c)
+  s.sendMouseRelease(toRow, toCol, button, modifiers)
 
 proc sendMouseClick*(s: var TuiTestSession; row, col: int;
                     button: MouseButton = mbLeft;
                     modifiers: set[KeyModifier] = {}) =
-  ## SGR 1006 mouse press + release at 1-based (col, row).
-  var bcode = case button
-    of mbLeft: 0
-    of mbMiddle: 1
-    of mbRight: 2
-    of mbWheelUp: 64
-    of mbWheelDown: 65
-  if kmShift in modifiers: bcode = bcode or 4
-  if kmAlt in modifiers: bcode = bcode or 8
-  if kmCtrl in modifiers: bcode = bcode or 16
-  let xCol = col + 1
-  let yRow = row + 1
-  let press = "\x1b[<" & $bcode & ";" & $xCol & ";" & $yRow & "M"
-  let release = "\x1b[<" & $bcode & ";" & $xCol & ";" & $yRow & "m"
-  s.send(press)
-  s.send(release)
+  ## SGR 1006 press and release at one 0-based (row, col).
+  s.sendMousePress(row, col, button, modifiers)
+  s.sendMouseRelease(row, col, button, modifiers)
 
 proc sendMouseScroll*(s: var TuiTestSession; row, col: int; direction: ScrollDir) =
-  let btn = if direction == sdUp: mbWheelUp else: mbWheelDown
+  let btn = case direction
+    of sdUp: mbWheelUp
+    of sdDown: mbWheelDown
+    of sdLeft: mbWheelLeft
+    of sdRight: mbWheelRight
   s.sendMouseClick(row, col, btn)
+
+type
+  FocusReportingError* = object of CatchableError
+    ## Raised when a focus change is to be reported to a child that did not
+    ## ask for focus reports (DEC 1004): a real terminal would not send one.
+
+proc focusReporting*(s: var TuiTestSession): bool =
+  ## Whether the child asked for focus reports (`CSI ? 1004 h`).
+  discard pump(s, 0)
+  s.screen.focusReportEnabled()
+
+proc sendFocus*(s: var TuiTestSession; focused: bool) =
+  ## The report a terminal writes when its window gains (`CSI I`) or loses
+  ## (`CSI O`) the focus. libvterm has no window to focus, so this is the
+  ## byte sequence the terminal would write
+  ## (https://invisible-island.net/xterm/ctlseqs/ctlseqs.html, FocusIn/FocusOut).
+  if not s.focusReporting():
+    raise newException(FocusReportingError,
+      "the application did not ask for focus reports (DEC 1004)")
+  s.send(if focused: "\e[I" else: "\e[O")
 
 # ---------------------------------------------------------------------------
 # Synchronization
@@ -715,11 +1175,53 @@ proc exitCode*(s: var TuiTestSession): Option[int] =
   discard pump(s, 50)
   s.pty.exitCode()
 
+when defined(posix):
+  from std/posix import nil
+  proc ptsnameC(fd: cint): cstring {.importc: "ptsname", header: "<stdlib.h>".}
+  var FIONREAD_C {.importc: "FIONREAD", header: "<sys/ioctl.h>".}: cuint
+
+proc pendingInput*(s: var TuiTestSession): int =
+  ## How many bytes written to the child it has not read yet: the input
+  ## still queued on its terminal. Zero once the child has read everything
+  ## sent to it. Measured on a descriptor of the child's own terminal opened
+  ## without becoming its controller and never read from (FIONREAD), since
+  ## the pty's master side does not report what the slave holds. Bytes just
+  ## written reach the child's terminal a moment later (the kernel moves
+  ## them through the pty's flip buffer), so a count read at once after a
+  ## `send` can still be 0. -1 when the platform cannot say.
+  when defined(posix):
+    if s.closed: return 0
+    if not s.peekOpen:
+      let name = ptsnameC(s.pty.master.fd)
+      if name == nil: return -1
+      let fd = posix.open(name, posix.O_RDONLY or posix.O_NOCTTY or posix.O_NONBLOCK or posix.O_CLOEXEC)
+      if fd < 0: return -1
+      s.peekFd = fd
+      s.peekOpen = true
+    var n: cint = 0
+    if posix.ioctl(s.peekFd, uint(FIONREAD_C), addr n) != 0: return -1
+    int(n)
+  else:
+    -1
+
 proc close*(s: var TuiTestSession) =
   ## Reap the child + close the pty + release the IPC socket. Idempotent.
+  ##
+  ## BOUNDED. A child still running is ended first with SIGTERM, then SIGKILL
+  ## a quarter-second later (`terminate`), and only then is the pty closed.
+  ## Closing alone hangs up the child with SIGHUP and waits for it without a
+  ## limit, and a child that ignores SIGHUP (inherited from a `nohup` caller,
+  ## as a mutation grade's children are) was waited for forever: a `cat`
+  ## blocked reading its pty held a grade for two and a half hours.
   if s.closed: return
+  if s.pty.isAlive:
+    s.pty.terminate()
   s.pty.close()
   s.ipc.closeServer()
+  when defined(posix):
+    if s.peekOpen:
+      discard posix.close(s.peekFd)
+      s.peekOpen = false
   s.closed = true
 
 proc waitExit*(s: var TuiTestSession; timeout: Duration): Option[int] =

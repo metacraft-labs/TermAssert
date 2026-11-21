@@ -12,7 +12,13 @@ synchronized output, kitty keyboard, mouse 1006/1016).
 - Spawn a child process inside a pseudo-terminal.
 - Parse the child's output through a real libvterm instance into a
   `Screen` value.
-- Synthesize input (text, named keys, mouse SGR sequences).
+- Synthesize input (text, named keys, mouse SGR sequences): clicks and the wheel
+  (`sendMouseClick`, `sendMouseScroll`), and a press, motion and release as separate
+  reports (`sendMousePress`, `sendMouseMove`, `sendMouseRelease`) or as a drag
+  (`sendMouseDrag`). Motion is sent only when the child enabled it — DEC 1002 for
+  motion with a button held, 1003 for any motion; otherwise `MouseTrackingError` is
+  raised, because a real terminal would not report it. `mouseTracking()` says what
+  the child enabled.
 - Block on conditions (`waitForText`, `waitForRegionChange`,
   `waitForNotification`, ...).
 - Receive screenshot / exit / ping requests from the child via a Unix
@@ -97,7 +103,6 @@ sess.close()
 
 ## Specs
 
-The authoritative spec for this library is the **M28** entry in
-`Front-Ends/IsoNim/isonim-tui.milestones.org` in the
-`codetracer-specs` repo. Repo-level conformance is governed by
-`metacraft-specs/policies/repo-requirements.md`.
+Design documents, plans and open issues for this repository are kept in the
+maintainers' project-management repository, which is not public. Contributors
+without access should open a GitHub issue here.

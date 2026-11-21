@@ -38,7 +38,7 @@
 ##   +-- snapshots: Table[string, ScreenSnapshot]   (IPC-recorded screens)
 ## ```
 
-import std/[options, os, strutils, monotimes, times, tables, json]
+import std/[options, os, strutils, monotimes, times, tables, json, math]
 
 import nim_pty
 import nim_libvterm
@@ -486,82 +486,194 @@ proc sendControl*(s: var TuiTestSession; c: char) =
   var arr = [b]
   s.pty.write(arr)
 
-proc sendKey*(s: var TuiTestSession; name: string) =
-  ## Common named keys (xterm sequences). Modifiers in the form
-  ## `ctrl+a`, `alt+f1` are handled by stripping the prefix.
+type
+  KeyEncodingError* = object of ValueError
+    ## Raised for a key with modifiers no terminal encoding expresses: the key
+    ## is never sent without them.
+
+proc keyBytes*(name: string): string =
+  ## The bytes a terminal (xterm) sends for a key name with optional
+  ## `ctrl+`, `alt+`, `shift+` prefixes. Modifiers on cursor, editing and
+  ## function keys use xterm's parameter (1 + shift 1, alt 2, ctrl 4);
+  ## Shift on a letter is its capital; Ctrl on a letter is its control
+  ## character; Alt prefixes ESC. A combination with no encoding raises
+  ## `KeyEncodingError` rather than dropping a modifier.
   var key = name.toLowerAscii()
-  var ctrl = false
-  var alt = false
+  var ctrl, alt, shift = false
   while true:
     if key.startsWith("ctrl+"):
       ctrl = true; key = key[5 .. ^1]
     elif key.startsWith("alt+"):
       alt = true; key = key[4 .. ^1]
     elif key.startsWith("shift+"):
-      key = key[6 .. ^1]
+      shift = true; key = key[6 .. ^1]
     else: break
-  var seq2 = ""
+  let m = 1 + (if shift: 1 else: 0) + (if alt: 2 else: 0) + (if ctrl: 4 else: 0)
+  let modified = m > 1
+  proc csi(final: char): string =
+    (if modified: "\x1b[1;" & $m & $final else: "\x1b[" & $final)
+  proc tilde(n: int): string =
+    (if modified: "\x1b[" & $n & ";" & $m & "~" else: "\x1b[" & $n & "~")
+  proc ss3(final: char): string =
+    (if modified: "\x1b[1;" & $m & $final else: "\x1bO" & $final)
+  proc plain(bytes: string): string =
+    # keys whose only modifier encoding is the Alt (ESC) prefix
+    if ctrl or shift:
+      raise newException(KeyEncodingError, "no terminal encoding for " & name)
+    (if alt: "\x1b" & bytes else: bytes)
   case key
-  of "up": seq2 = "\x1b[A"
-  of "down": seq2 = "\x1b[B"
-  of "right": seq2 = "\x1b[C"
-  of "left": seq2 = "\x1b[D"
-  of "home": seq2 = "\x1b[H"
-  of "end": seq2 = "\x1b[F"
-  of "pageup", "pgup": seq2 = "\x1b[5~"
-  of "pagedown", "pgdn": seq2 = "\x1b[6~"
-  of "insert": seq2 = "\x1b[2~"
-  of "delete", "del": seq2 = "\x1b[3~"
-  of "tab": seq2 = "\t"
-  of "backtab": seq2 = "\x1b[Z"
-  of "enter", "return": seq2 = "\r"
-  of "escape", "esc": seq2 = "\x1b"
-  of "backspace": seq2 = "\x7f"
-  of "space": seq2 = " "
-  of "f1": seq2 = "\x1bOP"
-  of "f2": seq2 = "\x1bOQ"
-  of "f3": seq2 = "\x1bOR"
-  of "f4": seq2 = "\x1bOS"
-  of "f5": seq2 = "\x1b[15~"
-  of "f6": seq2 = "\x1b[17~"
-  of "f7": seq2 = "\x1b[18~"
-  of "f8": seq2 = "\x1b[19~"
-  of "f9": seq2 = "\x1b[20~"
-  of "f10": seq2 = "\x1b[21~"
-  of "f11": seq2 = "\x1b[23~"
-  of "f12": seq2 = "\x1b[24~"
+  of "up": csi('A')
+  of "down": csi('B')
+  of "right": csi('C')
+  of "left": csi('D')
+  of "home": csi('H')
+  of "end": csi('F')
+  of "pageup", "pgup": tilde(5)
+  of "pagedown", "pgdn": tilde(6)
+  of "insert": tilde(2)
+  of "delete", "del": tilde(3)
+  of "f1": ss3('P')
+  of "f2": ss3('Q')
+  of "f3": ss3('R')
+  of "f4": ss3('S')
+  of "f5": tilde(15)
+  of "f6": tilde(17)
+  of "f7": tilde(18)
+  of "f8": tilde(19)
+  of "f9": tilde(20)
+  of "f10": tilde(21)
+  of "f11": tilde(23)
+  of "f12": tilde(24)
+  of "tab":
+    if shift and not ctrl and not alt: "\x1b[Z"
+    else: plain("\t")
+  of "backtab": (if modified: raise newException(KeyEncodingError, "no terminal encoding for " & name) else: "\x1b[Z")
+  of "enter", "return": plain("\r")
+  of "escape", "esc": plain("\x1b")
+  of "backspace": plain("\x7f")
+  of "space":
+    if ctrl and not shift: (if alt: "\x1b\x00" else: "\x00")
+    else: plain(" ")
   else:
-    if key.len == 1:
-      var b = byte(ord(key[0]))
-      if ctrl:
-        b = b and 0x1F.byte
-      var pre = ""
-      if alt: pre.add '\x1b'
-      seq2 = pre & $char(b)
-    else:
+    if key.len != 1:
       raise newException(ValueError, "unknown key: " & name)
-  if seq2.len > 0:
-    s.send(seq2)
+    var c = key[0]
+    # the case of a single character comes from the original spelling
+    let orig = name[^1]
+    if orig in {'A'..'Z'}: c = orig
+    if shift:
+      if c in {'a'..'z'}: c = c.toUpperAscii
+      elif c notin {'A'..'Z'}:
+        raise newException(KeyEncodingError, "no terminal encoding for " & name &
+          " (send the shifted character itself)")
+    var b = byte(ord(c))
+    if ctrl:
+      if c in {'a'..'z', 'A'..'Z'} and not shift: b = b and 0x1F.byte
+      elif c in {'A'..'Z'} and shift:
+        raise newException(KeyEncodingError, "no terminal encoding for " & name)
+      elif c in {'@', '[', '\\', ']', '^', '_'}: b = b and 0x1F.byte
+      else: raise newException(KeyEncodingError, "no terminal encoding for " & name)
+    (if alt: "\x1b" else: "") & $char(b)
+
+proc sendKey*(s: var TuiTestSession; name: string) =
+  ## Send a named key ("up", "f5", "enter", a single character) with optional
+  ## `ctrl+`, `alt+` and `shift+` prefixes, encoded as a terminal does (see
+  ## `keyBytes`). Raises `KeyEncodingError` for a combination a terminal
+  ## cannot express; a modifier is never dropped.
+  s.send(keyBytes(name))
+
+type
+  MouseTrackingError* = object of CatchableError
+    ## Raised when a pointer report is asked for that the child did not
+    ## enable: a real terminal would not send it, so sending it would test a
+    ## terminal that does not exist.
+
+proc mouseTracking*(s: var TuiTestSession): MouseTracking =
+  ## Which pointer events the child enabled (DEC 1000 / 1002 / 1003).
+  discard pump(s, 0)
+  s.screen.mouseTracking()
+
+proc buttonCode(button: MouseButton): int =
+  case button
+  of mbLeft: 0
+  of mbMiddle: 1
+  of mbRight: 2
+  of mbWheelUp: 64
+  of mbWheelDown: 65
+
+proc modifierBits(modifiers: set[KeyModifier]): int =
+  (if kmShift in modifiers: 4 else: 0) or (if kmAlt in modifiers: 8 else: 0) or
+    (if kmCtrl in modifiers: 16 else: 0)
+
+proc sgrReport(code, row, col: int; final: char): string =
+  ## One SGR 1006 report at 0-based (row, col); the wire format is 1-based
+  ## column first. Every pointer procedure goes through this one encoder.
+  "\x1b[<" & $code & ";" & $(col + 1) & ";" & $(row + 1) & $final
+
+proc sendMousePress*(s: var TuiTestSession; row, col: int;
+                     button: MouseButton = mbLeft;
+                     modifiers: set[KeyModifier] = {}) =
+  ## SGR 1006 press at 0-based (row, col).
+  s.send(sgrReport(buttonCode(button) or modifierBits(modifiers), row, col, 'M'))
+
+proc sendMouseRelease*(s: var TuiTestSession; row, col: int;
+                       button: MouseButton = mbLeft;
+                       modifiers: set[KeyModifier] = {}) =
+  ## SGR 1006 release at 0-based (row, col).
+  s.send(sgrReport(buttonCode(button) or modifierBits(modifiers), row, col, 'm'))
+
+proc requireTracking(s: var TuiTestSession; needed: MouseTracking; what: string) =
+  let have = s.mouseTracking()
+  if ord(have) < ord(needed):
+    raise newException(MouseTrackingError, what & " needs mouse tracking " & $needed &
+      " (DEC " & (if needed == mtDrag: "1002" else: "1003") & "), but the child enabled " &
+      $have & "; a real terminal would send no motion report")
+
+proc sendMouseMove*(s: var TuiTestSession; row, col: int;
+                    held: set[MouseButton] = {};
+                    modifiers: set[KeyModifier] = {}) =
+  ## SGR 1006 motion report at 0-based (row, col): the code of the held
+  ## button (or 3 for none) plus 32. Motion with a button held needs the
+  ## child to have enabled 1002 or 1003; motion with none needs 1003.
+  ## Otherwise raises `MouseTrackingError` and sends nothing.
+  var base = 3
+  for b in [mbLeft, mbMiddle, mbRight]:
+    if b in held:
+      base = buttonCode(b)
+      break
+  s.requireTracking((if base == 3: mtMove else: mtDrag), "a pointer motion")
+  s.send(sgrReport((base + 32) or modifierBits(modifiers), row, col, 'M'))
+
+proc sendMouseDrag*(s: var TuiTestSession; fromRow, fromCol, toRow, toCol: int;
+                    button: MouseButton = mbLeft;
+                    modifiers: set[KeyModifier] = {};
+                    steps = 0) =
+  ## A drag: press at (fromRow, fromCol), motion reports with the button held,
+  ## release at (toRow, toCol). With `steps = 0` there is one motion report per
+  ## cell crossed along the straight line, ending at the destination; with
+  ## `steps = n`, n reports evenly spaced. Needs the child to have enabled
+  ## 1002 or 1003 — checked before anything is sent.
+  s.requireTracking(mtDrag, "a drag")
+  let dr = toRow - fromRow
+  let dc = toCol - fromCol
+  let n = (if steps > 0: steps else: max(abs(dr), abs(dc)))
+  let code = (buttonCode(button) + 32) or modifierBits(modifiers)
+  s.sendMousePress(fromRow, fromCol, button, modifiers)
+  var last = (fromRow, fromCol)
+  for k in 1 .. n:
+    let r = fromRow + int(round(float(dr * k) / float(n)))
+    let c = fromCol + int(round(float(dc * k) / float(n)))
+    if (r, c) == last and steps == 0: continue
+    s.send(sgrReport(code, r, c, 'M'))
+    last = (r, c)
+  s.sendMouseRelease(toRow, toCol, button, modifiers)
 
 proc sendMouseClick*(s: var TuiTestSession; row, col: int;
                     button: MouseButton = mbLeft;
                     modifiers: set[KeyModifier] = {}) =
-  ## SGR 1006 mouse press + release at 1-based (col, row).
-  var bcode = case button
-    of mbLeft: 0
-    of mbMiddle: 1
-    of mbRight: 2
-    of mbWheelUp: 64
-    of mbWheelDown: 65
-  if kmShift in modifiers: bcode = bcode or 4
-  if kmAlt in modifiers: bcode = bcode or 8
-  if kmCtrl in modifiers: bcode = bcode or 16
-  let xCol = col + 1
-  let yRow = row + 1
-  let press = "\x1b[<" & $bcode & ";" & $xCol & ";" & $yRow & "M"
-  let release = "\x1b[<" & $bcode & ";" & $xCol & ";" & $yRow & "m"
-  s.send(press)
-  s.send(release)
+  ## SGR 1006 press and release at one 0-based (row, col).
+  s.sendMousePress(row, col, button, modifiers)
+  s.sendMouseRelease(row, col, button, modifiers)
 
 proc sendMouseScroll*(s: var TuiTestSession; row, col: int; direction: ScrollDir) =
   let btn = if direction == sdUp: mbWheelUp else: mbWheelDown

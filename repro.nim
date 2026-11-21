@@ -104,9 +104,11 @@
 ##
 ## **Per-test platform gating.** Every ``tests/test_harness_*.nim`` file
 ## ``import term_assert``, and ``term_assert`` transitively pulls in
-## ``src/term_assert/ipc.nim`` which builds a ``Sockaddr_un`` AF_UNIX
-## Unix-domain IPC server (``std/posix``). ``Sockaddr_un`` / ``AF_UNIX`` are
-## POSIX constructs absent from Nim's Windows ``std/posix`` surface, and no
+## ``src/term_assert/ipc.nim``, which serves a Unix-domain socket on POSIX and
+## a Win32 named pipe on Windows (TermAssert-pm spec
+## ``Testing/TermAssert-Windows-IPC.md``). The Windows IPC layer is tested by
+## its own edge (``tests/test_ipc_windows_pipe.nim``); the harness corpus
+## still needs a real pty and screen, so it stays POSIX-only, and no
 ## test carries an in-``test`` ``when defined(windows): skip()`` fallback, so
 ## the WHOLE harness corpus is genuinely POSIX-only: gated
 ## ``when not defined(windows)`` at extraction so the edges are present on
@@ -200,6 +202,10 @@ const posixHarnessSpecs: seq[HarnessTestSpec] = @[
     binary: "build/test-bin/test_harness_exit_ipc"),
   HarnessTestSpec(source: "tests/test_harness_mouse_events.nim",
     binary: "build/test-bin/test_harness_mouse_events"),
+  HarnessTestSpec(source: "tests/test_harness_mouse_drag.nim",
+    binary: "build/test-bin/test_harness_mouse_drag"),
+  HarnessTestSpec(source: "tests/test_harness_key_modifiers.nim",
+    binary: "build/test-bin/test_harness_key_modifiers"),
   HarnessTestSpec(source: "tests/test_harness_hyperlink_assertion.nim",
     binary: "build/test-bin/test_harness_hyperlink_assertion"),
   HarnessTestSpec(source: "tests/test_harness_notification_received.nim",

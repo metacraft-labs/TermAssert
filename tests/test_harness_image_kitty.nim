@@ -45,9 +45,16 @@ suite "M28 harness: image (Kitty graphics)":
     compileChildApp("test_app_image_kitty")
     let bin = childAppPath("test_app_image_kitty")
     var sess = newTuiTest(bin, @[]).width(80).height(24).spawn()
-    let _ = sess.drainOutput(150)
-
+    let t0 = epochTime()
+    let drained = sess.drainOutput(150)
     let imgs = sess.images()
+    # Diagnostic (CI flake, TermAssert #13): when the count is wrong, say how
+    # long the drain took, how many bytes it read, and what the screen shows,
+    # so the failing log carries the state. The assertion below is unchanged.
+    if imgs.len != 1:
+      echo "DIAG kitty images=", imgs.len, " drained-bytes=", drained,
+           " elapsed-ms=", int((epochTime() - t0) * 1000)
+      echo "DIAG kitty screen:\n", sess.screenContents()
     check imgs.len == 1
     if imgs.len >= 1:
       let img = sess.imageData(imgs[0])

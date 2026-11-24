@@ -86,6 +86,11 @@ jobs:
         with:
           env-flavor: reprobuild
           gh-token: ${{ steps.ci_token.outputs.token }}
+          # The same CI Token Provider App the step above mints from. The shared
+          # action uses it for the credential broker that owns this job's GitHub
+          # token (its nix/GitHub access), so the Nix tarball fetch is not 401.
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
 
       - name: repro build
         # Builds the conventional `build` collection declared in

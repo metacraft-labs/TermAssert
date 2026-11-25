@@ -1,0 +1,6 @@
+schema = "reprobuild.catalog-imports.v1"
+
+[[import]]
+repo = "reprobuild-packages"
+remote = "https://github.com/metacraft-labs/reprobuild-packages"
+commit = "7559a1c9648c45117381d6ab38829dfa6177d701"

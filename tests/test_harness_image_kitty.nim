@@ -45,9 +45,21 @@ suite "M28 harness: image (Kitty graphics)":
     compileChildApp("test_app_image_kitty")
     let bin = childAppPath("test_app_image_kitty")
     var sess = newTuiTest(bin, @[]).width(80).height(24).spawn()
-    let _ = sess.drainOutput(150)
-
-    let imgs = sess.images()
+    # The child may not have written its image within a fixed 150 ms drain on a
+    # loaded runner (reproduced on macOS: zero bytes read at ~300 ms). Drain in
+    # short steps for a bounded 5 s until the image is there, so the test waits
+    # for what it checks instead of guessing a start-up time. The assertion
+    # below is unchanged; a missing image still fails after the bound.
+    let t0 = epochTime()
+    var drained = 0
+    var imgs = sess.images()
+    while imgs.len == 0 and epochTime() - t0 < 5.0:
+      drained += sess.drainOutput(50)
+      imgs = sess.images()
+    if imgs.len != 1:
+      echo "DIAG kitty images=", imgs.len, " drained-bytes=", drained,
+           " elapsed-ms=", int((epochTime() - t0) * 1000)
+      echo "DIAG kitty screen:\n", sess.screenContents()
     check imgs.len == 1
     if imgs.len >= 1:
       let img = sess.imageData(imgs[0])

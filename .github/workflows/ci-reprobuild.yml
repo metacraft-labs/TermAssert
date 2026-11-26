@@ -85,19 +85,23 @@ jobs:
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: reprobuild
-          repro-version: v0.2.26
           gh-token: ${{ steps.ci_token.outputs.token }}
+          # The same CI Token Provider App the step above mints from. The shared
+          # action uses it for the credential broker that owns this job's GitHub
+          # token (its nix/GitHub access), so the Nix tarball fetch is not 401.
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
 
       - name: repro build
         # Builds the conventional `build` collection declared in
         # `repro.nim`. Verifies the primary shipping artefact (the
         # recorder binary or extension) materialises through the
         # reprobuild engine identically to `just build`.
-        run: dev-exec repro build
+        run: dev-exec repro build ${{ runner.os != 'Windows' && '--tool-provisioning-for=nim=nix' || '' }}
 
       - name: repro test
         # Materialises the `test` collection.
-        run: dev-exec repro test
+        run: dev-exec repro test ${{ runner.os != 'Windows' && '--tool-provisioning-for=nim=nix' || '' }}
 
       - name: just build (cross-check)
         # Re-runs the legacy `just build` path inside the same env so

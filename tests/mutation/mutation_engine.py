@@ -2,7 +2,8 @@
 
 An arm is a named source edit: replace `old` (which must occur exactly once in
 its file) with `new`, run the kill command, restore the file. The arm is KILLED
-when the command fails, SURVIVED when it passes. A gate is met only when every
+when the command fails, SURVIVED when it passes, TIMEOUT when it is still
+running at the arm's deadline (`MUTATION_ARM_TIMEOUT_S`). A gate is met only when every
 arm is killed.
 
 The subject files' SHA-256 are recorded beside the harness
@@ -21,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,6 +36,12 @@ class Arm:
     why: str
     pre: list = field(default_factory=list)       # commands run after the edit, before the kill command
     restore: list = field(default_factory=list)   # further files the pre-commands rewrite
+
+
+ARM_TIMEOUT_S = int(os.environ.get("MUTATION_ARM_TIMEOUT_S", "1200"))
+"""How long one arm's kill command may run (`MUTATION_ARM_TIMEOUT_S`): one
+still running then is ended with its process group and graded TIMEOUT, which
+does not meet the gate."""
 
 
 def scrub(text: str, root: Path, build: str) -> str:
@@ -101,15 +109,31 @@ def main(name: str, root: Path, arms: list, kill: list):
             for cmd in a.pre:
                 subprocess.run(cmd, cwd=root, env=env, check=True, capture_output=True)
             t0 = time.time()
-            r = subprocess.run(kill, cwd=root, env=env, capture_output=True, text=True)
+            # in a session of its own, so that a kill command still running
+            # at the arm's deadline is ended with everything it started
+            p = subprocess.Popen(kill, cwd=root, env=env, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, errors="replace",
+                                 start_new_session=True)
+            timed_out = False
+            try:
+                out, err = p.communicate(timeout=ARM_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                out, err = p.communicate()
             dt = time.time() - t0
         finally:
             for f, text in saved.items():
                 (root / f).write_text(text)
-        verdict = "KILLED" if r.returncode != 0 else "SURVIVED"
-        if verdict == "SURVIVED":
+        # an arm the kill command did not finish on is not killed: a deadline
+        # is no assertion
+        verdict = "TIMEOUT" if timed_out else ("KILLED" if p.returncode != 0 else "SURVIVED")
+        if verdict != "KILLED":
             survived += 1
-        tail = [l for l in (r.stdout + r.stderr).splitlines() if l.strip()][-3:]
+        tail = [l for l in ((out or "") + (err or "")).splitlines() if l.strip()][-3:]
         lines.append(f"{verdict:8} {a.id:6} {dt:6.1f}s  {a.why}")
         for t in tail:
             lines.append(f"           | {scrub(t, root, build)[:160]}")
@@ -118,7 +142,7 @@ def main(name: str, root: Path, arms: list, kill: list):
         assert sha(root / s) == recorded[s], f"{s} was not restored"
     total = len([a for a in arms if not only or a.id in only])
     lines.append("")
-    lines.append(f"{total - survived}/{total} killed, {survived} survived")
+    lines.append(f"{total - survived}/{total} killed, {survived} survived or timed out")
     if not only:
         results.write_text("\n".join(lines) + "\n")
     print(lines[-1])

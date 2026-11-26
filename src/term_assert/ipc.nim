@@ -276,8 +276,9 @@ proc startIpcServer*(path: string = ""): IpcServer =
       raiseIpc("socket")
     let fd = sh.cint
     var addrUn: Sockaddr_un
-    # sun_family is uint8 on macOS and uint16 on Linux; take the field's own
-    # type so the assignment compiles on both.
+    # `sun_family` is a ushort on Linux and a uint8 on macOS (BSD keeps a
+    # separate `sun_len` byte); take the field's own type so this compiles on
+    # both.
     addrUn.sun_family = typeof(addrUn.sun_family)(AF_UNIX)
     if p.len >= sizeof(addrUn.sun_path):
       discard posix.close(fd)

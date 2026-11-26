@@ -1,5 +1,5 @@
 ## test_app_mouse - reads SGR mouse sequences from stdin and prints
-## "click@col,row" for every press it sees. Used by
+## "click@col,row button=B" for every press it sees (B: the SGR button code). Used by
 ## `test_harness_mouse_events`.
 
 import std/[strutils, posix, termios]
@@ -41,7 +41,7 @@ when isMainModule:
       if parts.len == 3:
         let col = parts[1]
         let row = parts[2]
-        let line = "click@" & col & "," & row & "\r\n"
+        let line = "click@" & col & "," & row & " button=" & parts[0] & "\r\n"
         discard write(1.cint, unsafeAddr line[0], line.len)
     if buf.contains("\x04"):
       break

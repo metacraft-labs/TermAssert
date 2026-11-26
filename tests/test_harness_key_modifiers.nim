@@ -30,6 +30,16 @@ suite "TermAssert: keys with modifiers":
     check keyBytes("A") == "A"
     check keyBytes("alt+enter") == "\x1b\r"
 
+  test "a capital after a modifier is the letter's key; Shift is spelled":
+    # menus and keymaps write Alt+T for the chord Alt+t
+    check keyBytes("Alt+T") == "\x1bt"
+    check keyBytes("alt+T") == keyBytes("alt+t")
+    check keyBytes("Ctrl+A") == "\x01"
+    check keyBytes("Alt+Shift+T") == "\x1bT"
+    check keyBytes("Shift+A") == "A"
+    # a capital on its own is the character typed
+    check keyBytes("T") == "T"
+
   test "a combination no terminal encoding expresses is refused":
     for k in ["ctrl+enter", "shift+enter", "ctrl+tab", "shift+esc", "ctrl+shift+a",
               "ctrl+1", "shift+1", "ctrl+shift+backtab"]:

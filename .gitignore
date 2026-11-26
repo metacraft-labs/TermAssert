@@ -21,3 +21,4 @@ nimcache/
 # keeps its intermediate files here, never in the shared ~/.cache/nim.
 .nimcache/
 
+__pycache__/
